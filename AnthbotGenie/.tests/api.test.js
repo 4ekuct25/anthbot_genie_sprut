@@ -310,18 +310,31 @@ describe('AnthbotGenie — отправка команд', () => {
     expect(authorization).toBe(expected.authorization);
   });
 
-  it('запасные варианты подписи меняют путь на проводе и в подписи', ({ scenario, http }) => {
+  it('запасной вариант подписи меняет путь и на проводе, и в подписи', ({ scenario, http }) => {
     http.mock.onPost(/\/topics\//, { status: 200, body: '{}' });
 
-    scenario.call('anthbotSendCommand', [session(), 'mow_start', 1, { topicMode: 1 }]);
+    scenario.call('anthbotSendCommand', [session(), 'mow_start', 1, { topicMode: 0 }]);
     scenario.call('anthbotSendCommand', [session(), 'mow_start', 1, { topicMode: 2 }]);
 
-    // Вариант 1 — тот же путь, другая подпись; вариант 2 — сырой путь топика
+    // Вариант 0 — топик одним закодированным сегментом; вариант 2 — сырой путь топика
     expect(http.requests[0].url).toContain('%24aws%2Fthings');
-    expect(http.requests[0].headers['Authorization'])
-      .not.toBe(http.requests[1].headers['Authorization']);
     expect(http.requests[1].url).toBe(
       `https://${ENDPOINT}/topics/$aws/things/${SN}/shadow/name/service/update`);
+    expect(http.requests[0].headers['Authorization'])
+      .not.toBe(http.requests[1].headers['Authorization']);
+  });
+
+  it('изъятый вариант 1 не даёт третьей формы — работает как вариант 0', ({ scenario, http }) => {
+    // Нумерация сохранена ради журнала, поэтому дыра в ней должна вести себя предсказуемо:
+    // молча превратиться в вариант 0, а не отправить нечто среднее, чего AWS не примет.
+    http.mock.onPost(/\/topics\//, { status: 200, body: '{}' });
+
+    scenario.call('anthbotSendCommand', [session(), 'mow_start', 1, { topicMode: 0 }]);
+    scenario.call('anthbotSendCommand', [session(), 'mow_start', 1, { topicMode: 1 }]);
+
+    expect(http.requests[1].url).toBe(http.requests[0].url);
+    expect(http.requests[1].headers['Authorization'])
+      .toBe(http.requests[0].headers['Authorization']);
   });
 
   it('хэш тела в заголовке совпадает с реально отправленным телом', ({ scenario, http }) => {
