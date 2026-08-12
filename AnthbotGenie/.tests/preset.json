@@ -1,0 +1,130 @@
+{
+  "name": "Anthbot Genie — газонокосилка",
+  "description": "Виртуальный аксессуар косилки с сервисами, помеченными ключами: кошение, база, заряд, статус, настройки и две зоны. Логика висит на сервисе «Кошение [mow]». Для ручной проверки в веб-UI заполните логин и пароль Anthbot в опциях — сценарий пойдёт в реальное облако.",
+  "options": {
+    "username": "",
+    "password": "",
+    "areaCode": "7",
+    "serialNumber": "",
+    "pollIntervalSec": 60,
+    "commandViaShadow": false,
+    "debug": true
+  },
+  "variables": {},
+  "rooms": [
+    { "name": "Двор" }
+  ],
+  "accessories": [
+    {
+      "id": 200,
+      "name": "Газонокосилка",
+      "room": "Двор",
+      "target": true,
+      "services": [
+        {
+          "type": "AccessoryInformation",
+          "characteristics": [{ "type": "C_Online", "value": true }]
+        },
+        {
+          "type": "Switch",
+          "name": "Кошение [mow]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "Switch",
+          "name": "На базу [dock]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "Switch",
+          "name": "Обновить состояние [refresh]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "BatteryService",
+          "name": "Заряд [battery]",
+          "characteristics": [
+            { "type": "BatteryLevel", "value": 0 },
+            { "type": "ChargingState", "value": 0 },
+            { "type": "StatusLowBattery", "value": 0 }
+          ]
+        },
+        {
+          "type": "C_Option",
+          "name": "Статус [status]",
+          "characteristics": [{ "type": "C_String", "value": "" }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Высота кошения [height]",
+          "characteristics": [{ "type": "C_Integer", "value": 40 }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Громкость [volume]",
+          "characteristics": [{ "type": "C_Integer", "value": 50 }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Направление кошения [dir]",
+          "characteristics": [{ "type": "C_Integer", "value": 0 }]
+        },
+        {
+          "type": "Switch",
+          "name": "Своё направление [dirauto]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "Switch",
+          "name": "Датчик дождя [rain]",
+          "characteristics": [{ "type": "On", "value": true }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Пауза после дождя, ч [raintime]",
+          "characteristics": [{ "type": "C_Integer", "value": 3 }]
+        },
+        {
+          "type": "Switch",
+          "name": "Кошение у базы [nest]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Ошибка [error]",
+          "characteristics": [{ "type": "C_String", "value": "" }]
+        },
+        {
+          "type": "C_Option",
+          "name": "IP-адрес [ip]",
+          "characteristics": [{ "type": "C_String", "value": "" }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Прошивка [fw]",
+          "characteristics": [{ "type": "C_String", "value": "" }]
+        },
+        {
+          "type": "C_Option",
+          "name": "Время сессии, мин [time]",
+          "characteristics": [{ "type": "C_Integer", "value": 0 }]
+        },
+        {
+          "type": "Switch",
+          "name": "Зона 1 [zone1]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "Switch",
+          "name": "Зона 2 [zone2]",
+          "characteristics": [{ "type": "On", "value": false }]
+        },
+        {
+          "type": "Switch",
+          "name": "Авто-зона 1 [azone1]",
+          "characteristics": [{ "type": "On", "value": false }]
+        }
+      ]
+    }
+  ]
+}

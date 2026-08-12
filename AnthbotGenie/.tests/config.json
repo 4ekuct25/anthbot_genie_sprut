@@ -1,0 +1,14 @@
+{
+  "name": "AnthbotGenie",
+  "scenario": {
+    "globals": ["../source/AnthbotGenie.Global.js"],
+    "logic": ["../source/AnthbotGenie.Logic.js"]
+  },
+  "tests": ["*.test.js"],
+  "execution": {
+    "timeoutMs": 15000,
+    "strictMode": "es5+",
+    "encoding": "utf-8",
+    "isolation": "per-file"
+  }
+}
