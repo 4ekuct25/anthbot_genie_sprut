@@ -171,12 +171,20 @@ function trigger(source, value, variables, options, context) {
 
     anthbotInitVariables(variables);
     variables.boundServiceUuid = String(service.getUUID());
-    anthbotEnsurePolling(accessory, variables, options);
-    anthbotEnsureSubscription(accessory, variables, options);
 
-    if (anthbotIsEcho(source, value, variables) ||
-        anthbotIsSelfChangeByContext(context) ||
-        anthbotIsSystemReplayContext(context)) {
+    // Собственная запись сценария не поднимает ни таймер, ни подписку: и то и другое
+    // унаследовало бы цепочку причин этого вызова, а в ней уже есть наш собственный опрос.
+    // Почему это смертельно — см. anthbotEnsurePolling.
+    const selfCaused = anthbotIsEcho(source, value, variables) ||
+        anthbotIsSelfChangeByContext(context);
+    if (!selfCaused) {
+        anthbotEnsurePolling(accessory, variables, options);
+        anthbotEnsureSubscription(accessory, variables, options);
+    }
+
+    // Переигрывание характеристик хабом командой не считается, но таймер по нему поднять нужно:
+    // после старта хаба других поводов войти в trigger может и не быть.
+    if (selfCaused || anthbotIsSystemReplayContext(context)) {
         return;
     }
 
@@ -377,6 +385,16 @@ function anthbotIsSystemReplayContext(context) {
  *
  * Без снятия прежней задачи каждое сохранение сценария добавляло бы ещё один таймер —
  * опрос незаметно ускорялся бы в разы, пока облако не начнёт отвечать отказами.
+ *
+ * Вызывать ТОЛЬКО из trigger'а, вызванного не самим сценарием (см. selfCaused в trigger).
+ * Хаб тянет цепочку причин через таймеры: задача, поставленная здесь, наследует контекст
+ * текущего вызова целиком. Если поставить её из trigger'а, который сам поднят нашей же
+ * записью в характеристику, каждый цикл опроса удлиняет цепочку на «LOGIC ← C» —
+ * за четверть часа она упирается в предел хаба в 32 звена, и дальше КАЖДЫЙ опрос падает
+ * с «Max call stack size exceeded (32)» на первой же записи. Опрос при этом не
+ * останавливается, но состояние раскладывается лишь до места падения: в карточке живёт
+ * один статус, остальное застывает. Так и вышло на живом хабе 22.08.2026: в логе цепочка
+ * «LOGIC[8_Service 48.13] ← C[48.13.15 Switch.On] ← …» на 16 повторов, ошибка раз в минуту.
  */
 function anthbotEnsurePolling(accessory, variables, options) {
     const now = anthbotNowMs();

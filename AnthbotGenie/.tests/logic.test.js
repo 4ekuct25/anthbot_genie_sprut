@@ -188,6 +188,41 @@ describe('AnthbotGenie — опрос облака', () => {
     expect(variables.pollTask).toBeDefined();
   });
 
+  it('собственная запись сценария таймер опроса не пересоздаёт', (ctx) => {
+    // Хаб тянет цепочку причин сквозь таймеры. Таймер, поставленный из trigger'а, который сам
+    // поднят нашей же записью в [mow], наследует эту цепочку — и она удлиняется на «LOGIC ← C»
+    // каждый опрос, пока хаб не оборвёт её на 32 звеньях. На живом хабе 22.08.2026 это дало
+    // «Max call stack size exceeded (32)» раз в минуту и карточку, застывшую на одном статусе.
+    mockCloud(ctx.http);
+    const { mower, variables, options } = startScenario(ctx);
+    const armedAt = variables.pollArmedAtMs;
+
+    // Дольше дебаунса переармирования (10 с) — иначе он скроет ошибку
+    ctx.time.advance('61s');
+    ctx.scenario.run({
+      source: charByKey(mower, 'mow', HC.On), value: true, variables, options,
+      context: 'LOGIC[5] <- C[42.1.1] <- LOGIC[5]',
+    });
+
+    expect(variables.pollArmedAtMs).toBe(armedAt);
+    expect(ctx.time.pendingCount()).toBe(1);
+  });
+
+  it('действие пользователя таймер опроса переармирует', (ctx) => {
+    // Обратная сторона проверки выше: заперев переармирование целиком, легко получить сценарий,
+    // который после первого же собственного опроса перестаёт реагировать на смену настроек.
+    const { mower, variables, options } = startDocked(ctx);
+    const armedAt = variables.pollArmedAtMs;
+
+    ctx.time.advance('61s');
+    ctx.scenario.run({
+      source: charByKey(mower, 'mow', HC.On), value: true, variables, options,
+      context: 'C[42.1.1] <- WEB[user]',
+    });
+
+    expect(variables.pollArmedAtMs).toBeGreaterThan(armedAt);
+  });
+
   it('первый опрос раскладывает состояние косилки по характеристикам', (ctx) => {
     mockCloud(ctx.http);
     const { mower } = startScenario(ctx);
