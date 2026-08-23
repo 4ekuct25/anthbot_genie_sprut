@@ -132,6 +132,7 @@ info = {
         autoZones: [],
         zonesLoadedAtMs: 0,
         zoneTouchedAtMs: 0,
+        appliedZoneSignature: "",
         pollTask: undefined,
         pollArmedAtMs: 0,
         lastError: ""
@@ -610,20 +611,35 @@ const ANTHBOT_ZONE_HOLD_MS = 5 * 60 * 1000;
  * разу, и затирать по нему выбор владельца хаба нельзя: «косилка молчит» — не то же самое,
  * что «ничего не выбрано».
  *
- * Авто-зоны не подсвечиваются: их идентификаторы (у Genie 800 региону достаётся id 0) лежат
- * в другом пространстве, чем ручные (100+), и попадают ли они в active_area — не проверено.
- * Подсветить не тем id хуже, чем не подсветить вовсе.
+ * Авто-зоны не подсвечиваются, и это проверено, а не предположено: 23.08.2026 владелец хаба
+ * дважды запускал кошение авто-зоны из приложения, и active_area оба раза осталась составом
+ * ПРОШЛОГО задания по ручным зонам. Авто-задание видно по другой паре полей — mow_region и
+ * region_area.points, — но сопоставить точку задания с записью в разметке нельзя: координаты
+ * расходятся на метры. Подсветить не ту зону хуже, чем не подсветить вовсе.
+ *
+ * Кнопки переписываются, ТОЛЬКО когда состав задания изменился с прошлого применённого.
+ * Иначе опрос затирает свежий выбор человека: он гасит зону, жмёт «Кошение» (окно защиты при
+ * этом снимается — выбор израсходован), а ближайший опрос видит прежнюю active_area и зажигает
+ * зону обратно. Особенно заметно после авто-задания: active_area его не отражает вовсе, и в
+ * кнопках воскресает ручная зона, к происходящему отношения не имеющая. Поймано на живом хабе.
  */
 function anthbotApplyActiveZones(services, state, variables, options) {
     const active = state.activeZoneIds;
     if (!active || active.length === 0) {
         return;
     }
+
+    const signature = anthbotZoneSignature(active);
+    if (signature === variables.appliedZoneSignature) {
+        return;
+    }
     if (anthbotZonesHeldByUser(variables)) {
+        // Подпись не запоминаем: облако сказало новое, применить это нужно, но позже
         anthbotLog(options, "подсветка зон отложена: выбор только что правил человек");
         return;
     }
 
+    variables.appliedZoneSignature = signature;
     for (let index = 1; index <= 16; index++) {
         const zone = variables.zones[index - 1];
         if (!zone) {
@@ -632,6 +648,15 @@ function anthbotApplyActiveZones(services, state, variables, options) {
         const characteristic = anthbotValueCharacteristic(services["zone" + index]);
         anthbotWrite(characteristic, anthbotContainsId(active, zone.id), variables);
     }
+}
+
+/**
+ * Отпечаток состава задания, по которому видно, что облако сказало что-то новое.
+ * Порядок идентификаторов косилка меняет от опроса к опросу, поэтому перед склейкой сортируем:
+ * иначе перестановка тех же зон выглядела бы новым заданием и затирала выбор человека.
+ */
+function anthbotZoneSignature(ids) {
+    return ids.slice(0).sort(function (a, b) { return a - b; }).join(",");
 }
 
 function anthbotContainsId(ids, id) {

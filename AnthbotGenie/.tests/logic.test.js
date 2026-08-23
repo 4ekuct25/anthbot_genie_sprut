@@ -141,9 +141,39 @@ function shadowReads(http) {
   return http.requests.filter((r) => r.method === 'GET' && r.url.indexOf('/shadow?name=property') >= 0);
 }
 
-/** Запускает сценарий и доводит его до первого выполненного опроса. */
-function startScenario(ctx, options) {
+/**
+ * Запускает сценарий и доводит его до первого выполненного опроса.
+ *
+ * firstActive / nextActive — состав задания (active_area) на первом опросе и на всех следующих;
+ * задаются только теми тестами, которым нужна смена задания на ходу, остальные мокают облако сами.
+ * extra — что подмешать в ответ облака (например robot_sta: косилка на базе).
+ *
+ * Смена задания сделана счётчиком ответов, а НЕ через http.reset() с повторным mockCloud:
+ * reset сносит и логин с разметкой, следующий опрос падает в «Нет связи» и до характеристик не
+ * доходит — проверка тогда проходит по пустой причине, ничего не проверив.
+ */
+function startScenario(ctx, options, firstActive, nextActive, extra) {
   const { hub, scenario, time } = ctx;
+  if (nextActive) {
+    // Правило-счётчик регистрируем ПЕРВЫМ: матчер отдаёт первое подошедшее
+    let reads = 0;
+    ctx.http.mock.on((req) => {
+      if (req.method !== 'GET' || req.url.indexOf('/shadow?name=property') < 0) return false;
+      reads += 1;
+      return reads > 1;
+    }, {
+      status: 200,
+      body: JSON.stringify({
+        state: {
+          reported: Object.assign({}, REPORTED, extra || {}, { active_area: { id: nextActive } }),
+        },
+      }),
+    });
+  }
+  if (firstActive) {
+    mockCloud(ctx.http,
+      Object.assign({}, REPORTED, extra || {}, { active_area: { id: firstActive } }));
+  }
   const mower = addMower(hub);
   const variables = {};
   const opts = Object.assign({}, OPTIONS, options || {});
@@ -691,28 +721,81 @@ describe('AnthbotGenie — что командой НЕ считается', () 
     expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
   });
 
-  it('нажатие «Кошение» расходует выбор, и подсветку снова ведёт облако', (ctx) => {
-    mockCloud(ctx.http, Object.assign({}, REPORTED, {
-      robot_sta: { value: 'charge' }, active_area: { id: [101] },
-    }));
-    const { mower, variables, options } = startScenario(ctx);
-
-    charByKey(mower, 'zone1', HC.On).setValue(true);
-    ctx.scenario.run({
-      source: charByKey(mower, 'zone1', HC.On), value: true, variables, options,
-      context: 'C[42.14.1] <- WEB[user]',
-    });
+  it('после «Кошение» новое задание ложится в кнопки, не дожидаясь окна защиты', (ctx) => {
+    // Нажатие расходует выбор: окно снимается, и следующее задание косилки применяется сразу,
+    // а не через пять минут. Прежний состав при этом отметку не трогает — соседний тест.
+    // Стартуем с базы: если косилка уже косит, опрос сам записал mow=true, и «нажатие»
+    // сценарий примет за эхо — команда не уйдёт, а окно защиты не снимется
+    const { mower, variables, options } =
+      startScenario(ctx, {}, [100], [101], { robot_sta: { value: 'charge' } });
     expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
 
+    // Человек добавляет вторую зону и запускает кошение
+    charByKey(mower, 'zone2', HC.On).setValue(true);
+    ctx.scenario.run({
+      source: charByKey(mower, 'zone2', HC.On), value: true, variables, options,
+      context: 'C[42.15.1] <- WEB[user]',
+    });
     ctx.scenario.run({
       source: charByKey(mower, 'mow', HC.On), value: true, variables, options,
       context: 'C[42.1.1] <- WEB[user]',
     });
+
     ctx.time.advance('61s');
 
-    // Выбор израсходован заданием — облако снова главнее, отметка гаснет
+    // Косилка сообщила другое задание — оно и в кнопках, без пятиминутной паузы
     expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(false);
     expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+  });
+
+  it('прежний состав задания отметку не воскрешает', (ctx) => {
+    // Поймано на живом хабе 23.08.2026. Владелец гасит зону, отмечает авто-зону и жмёт
+    // «Кошение» — окно защиты снимается, выбор израсходован. Но active_area авто-задание не
+    // отражает, и ближайший опрос зажигал ручную зону обратно, к делу отношения не имеющую.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      robot_sta: { value: 'charge' }, active_area: { id: [101] },
+    }));
+    const { mower, variables, options } = startScenario(ctx);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+
+    // Человек гасит зону вручную
+    charByKey(mower, 'zone2', HC.On).setValue(false);
+    ctx.scenario.run({
+      source: charByKey(mower, 'zone2', HC.On), value: false, variables, options,
+      context: 'C[42.15.1] <- WEB[user]',
+    });
+
+    // Ждём заведомо дольше окна защиты (5 минут): дальше отметку держит уже не оно
+    for (let i = 0; i < 7; i++) ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(false);
+  });
+
+  it('новое задание косилки подсветку обновляет', (ctx) => {
+    // Обратная сторона проверки выше: заперев перезапись совсем, получим кнопки, навсегда
+    // застывшие на первом опросе
+    const { mower } = startScenario(ctx, {}, [101], [100]);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+
+    ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(false);
+  });
+
+  it('перестановка тех же зон новым заданием не считается', (ctx) => {
+    // Косилка отдаёт идентификаторы в произвольном порядке — на живой Genie 800 один и тот же
+    // набор приходил и как [102,103,104,100,101], и как [105,101,100,102,103,104].
+    // Без сортировки в отпечатке перестановка выглядела бы новым заданием и затирала выбор.
+    const { mower } = startScenario(ctx, {}, [100, 101], [101, 100]);
+    charByKey(mower, 'zone1', HC.On).setValue(false);
+
+    // Дольше окна защиты: запись характеристики доходит до сценария через подписку и сама
+    // взводит окно, поэтому короткого ожидания хватило бы и старому коду — проверка была бы
+    // пустой. Держать отметку дальше может только отпечаток состава.
+    for (let i = 0; i < 7; i++) ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(false);
   });
 
   it('подсветка зон командой косилке не становится', (ctx) => {
