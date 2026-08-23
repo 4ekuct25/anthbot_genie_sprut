@@ -648,6 +648,87 @@ describe('AnthbotGenie — что командой НЕ считается', () 
     expect(sentCommands(ctx.http)).toHaveLength(0);
   });
 
+  it('кнопки зон показывают состав задания косилки', (ctx) => {
+    // active_area — зоны задания, а не набор зон карты: замер на живой Genie 800 23.08.2026.
+    // Здесь на карте две зоны (100 «Перед домом», 101 «За домом»), в задании одна.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { active_area: { id: [101] } }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(false);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+  });
+
+  it('пустой список зон отметку не стирает', (ctx) => {
+    // Зонального задания не было ни разу — это не то же самое, что «ничего не выбрано»,
+    // и затирать по нему выбор владельца хаба нельзя
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { active_area: { id: [] } }));
+    const { mower } = startScenario(ctx);
+    charByKey(mower, 'zone1', HC.On).setValue(true);
+
+    ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
+  });
+
+  it('отметка человека несколько минут главнее облака', (ctx) => {
+    // Список задания переживает его завершение, поэтому на базе косилка отдаёт состав
+    // ПРОШЛОГО задания. Без окна защиты первый же опрос вернул бы старые зоны поверх
+    // новых отметок, и собрать выбор было бы нельзя в принципе.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      robot_sta: { value: 'charge' }, active_area: { id: [101] },
+    }));
+    const { mower, variables, options } = startScenario(ctx);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+
+    // Нажатие в интерфейсе — это запись значения плюс вызов сценария
+    charByKey(mower, 'zone1', HC.On).setValue(true);
+    ctx.scenario.run({
+      source: charByKey(mower, 'zone1', HC.On), value: true, variables, options,
+      context: 'C[42.14.1] <- WEB[user]',
+    });
+    ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
+  });
+
+  it('нажатие «Кошение» расходует выбор, и подсветку снова ведёт облако', (ctx) => {
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      robot_sta: { value: 'charge' }, active_area: { id: [101] },
+    }));
+    const { mower, variables, options } = startScenario(ctx);
+
+    charByKey(mower, 'zone1', HC.On).setValue(true);
+    ctx.scenario.run({
+      source: charByKey(mower, 'zone1', HC.On), value: true, variables, options,
+      context: 'C[42.14.1] <- WEB[user]',
+    });
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(true);
+
+    ctx.scenario.run({
+      source: charByKey(mower, 'mow', HC.On), value: true, variables, options,
+      context: 'C[42.1.1] <- WEB[user]',
+    });
+    ctx.time.advance('61s');
+
+    // Выбор израсходован заданием — облако снова главнее, отметка гаснет
+    expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(false);
+    expect(charByKey(mower, 'zone2', HC.On).getValue()).toBe(true);
+  });
+
+  it('подсветка зон командой косилке не становится', (ctx) => {
+    // Кнопки зон команд не порождают, но пишет их теперь опрос — а любая запись
+    // возвращается в сценарий через подписку. Приняв её за нажатие, сценарий отправил бы
+    // задание, которого никто не заказывал.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { active_area: { id: [100, 101] } }));
+    startScenario(ctx);
+    ctx.http.reset();
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { active_area: { id: [100, 101] } }));
+
+    ctx.time.advance('61s');
+
+    expect(sentCommands(ctx.http)).toHaveLength(0);
+  });
+
   it('высота вне диапазона обрезается, и хаб сразу показывает исправленное', (ctx) => {
     const { mower, variables, options } = startDocked(ctx);
 

@@ -131,6 +131,7 @@ info = {
         zones: [],
         autoZones: [],
         zonesLoadedAtMs: 0,
+        zoneTouchedAtMs: 0,
         pollTask: undefined,
         pollArmedAtMs: 0,
         lastError: ""
@@ -584,8 +585,84 @@ function anthbotApplyState(state, reported, services, variables, options) {
     anthbotWriteServiceValue(services, "areatotal", state.mowingAreaTotal, variables);
 
     anthbotApplyZoneNames(services, variables);
+    anthbotApplyActiveZones(services, state, variables, options);
     anthbotApplyDesktopDefaults(services, variables, options);
     anthbotApplyValueNames(services, options);
+}
+
+// Сколько отметка зон, сделанная человеком, защищена от перезаписи облаком.
+// Меньше периода опроса брать нельзя: выбор из нескольких зон занимает не одну минуту.
+const ANTHBOT_ZONE_HOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Подсвечивает кнопки зон составом текущего задания косилки.
+ *
+ * Что такое active_area, выяснено замерами на живой Genie 800 (прошивка 1.20.9) 23.08.2026 —
+ * из кода облака это не следует, а первая догадка была неверной:
+ *   • это НЕ список зон карты: при шести зонах на карте в задании из одной зоны там один id;
+ *   • это НЕ «оставшиеся» зоны: за многочасовое задание из шести зон список не укоротился;
+ *   • список ПЕРЕЖИВАЕТ завершение задания: полтора часа на базе с законченным заданием
+ *     косилка продолжала отдавать прежнюю шестёрку.
+ * Последнее и делает подсветку осмысленной в простое: кнопки показывают, что уедет
+ * следующим нажатием «Кошение», а не гаснут, едва робот встал на базу.
+ *
+ * Пустой список не трогает кнопки вовсе. Он приходит, когда зонального задания не было ни
+ * разу, и затирать по нему выбор владельца хаба нельзя: «косилка молчит» — не то же самое,
+ * что «ничего не выбрано».
+ *
+ * Авто-зоны не подсвечиваются: их идентификаторы (у Genie 800 региону достаётся id 0) лежат
+ * в другом пространстве, чем ручные (100+), и попадают ли они в active_area — не проверено.
+ * Подсветить не тем id хуже, чем не подсветить вовсе.
+ */
+function anthbotApplyActiveZones(services, state, variables, options) {
+    const active = state.activeZoneIds;
+    if (!active || active.length === 0) {
+        return;
+    }
+    if (anthbotZonesHeldByUser(variables)) {
+        anthbotLog(options, "подсветка зон отложена: выбор только что правил человек");
+        return;
+    }
+
+    for (let index = 1; index <= 16; index++) {
+        const zone = variables.zones[index - 1];
+        if (!zone) {
+            continue;
+        }
+        const characteristic = anthbotValueCharacteristic(services["zone" + index]);
+        anthbotWrite(characteristic, anthbotContainsId(active, zone.id), variables);
+    }
+}
+
+function anthbotContainsId(ids, id) {
+    for (let i = 0; i < ids.length; i++) {
+        if (ids[i] === id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Отметку зон, сделанную человеком, облако какое-то время не перебивает.
+ *
+ * Без этого окна выбор нельзя собрать в принципе: список задания переживает его завершение,
+ * поэтому на базе косилка отдаёт состав ПРОШЛОГО задания — и первый же опрос вернул бы
+ * старые зоны поверх новых отметок, не дав дойти до «Кошение».
+ */
+function anthbotZonesHeldByUser(variables) {
+    if (!variables.zoneTouchedAtMs) {
+        return false;
+    }
+    if (anthbotNowMs() - variables.zoneTouchedAtMs < ANTHBOT_ZONE_HOLD_MS) {
+        return true;
+    }
+    variables.zoneTouchedAtMs = 0;
+    return false;
+}
+
+function anthbotIsZoneKey(key) {
+    return key.indexOf("zone") === 0 || key.indexOf("azone") === 0;
 }
 
 // Сервисы, которых на рабочем столе быть не должно: настройки «поставил и забыл» и диагностика.
@@ -893,6 +970,15 @@ function anthbotCorrectHeight(key, value, services, variables) {
 function anthbotHandleUserChange(key, accessory, source, value, variables, options) {
     const services = anthbotServiceMap(accessory);
     const reported = variables.reported || {};
+
+    // Человек тронул зоны — с этой секунды его отметка главнее того, что отдаёт облако.
+    // Нажатие «Кошение» выбор расходует: задание ушло, и подсветка снова ведётся облаком.
+    if (anthbotIsZoneKey(key)) {
+        variables.zoneTouchedAtMs = anthbotNowMs();
+    } else if (key === "mow" && value) {
+        variables.zoneTouchedAtMs = 0;
+    }
+
     value = anthbotCorrectHeight(key, value, services, variables);
     const commands = anthbotCommandsFor(key, value, reported, variables, services, options);
 
@@ -966,7 +1052,7 @@ function anthbotCommandsFor(key, value, reported, variables, services, options) 
     // Кнопки зон — не команды, а отметки выбора: команда уходит один раз при старте кошения.
     // Иначе каждое нажатие было бы отдельным заданием, и последнее затирало бы предыдущие —
     // облако принимает список зон только целиком.
-    if (key.indexOf("zone") === 0 || key.indexOf("azone") === 0) {
+    if (anthbotIsZoneKey(key)) {
         return null;
     }
     return null;
