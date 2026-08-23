@@ -67,7 +67,7 @@ shadow облако принимает (HTTP 200), но косилка её не
 подписка на shadow-топики вместо опроса; она разобрана и **упирается не в облако, а в хаб**.
 
 Со стороны AWS push открыт полностью — проверено на живом облаке
-[пробой `wssprobe.mjs`](tools/wssprobe.mjs): рукопожатие принято, `CONNACK` = 0, `SUBACK` = QoS 1,
+[пробой tools/wssprobe.mjs](tools/wssprobe.mjs): рукопожатие принято, `CONNACK` = 0, `SUBACK` = QoS 1,
 а после отправки `get_all_props` пришёл `PUBLISH` с состоянием. То есть временные креды из
 `/iot/sts/arn` дают и `iot:Connect`, и `iot:Subscribe`, и подписка реально доставляет.
 
