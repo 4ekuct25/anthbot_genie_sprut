@@ -1295,8 +1295,34 @@ function anthbotMapReported(reported) {
         mowingTimeTotal: anthbotToInt(anthbotFirstDefined(data, ["mowing_time.value", "mowing_time"])),
         mowingAreaTotal: anthbotToInt(anthbotFirstDefined(data, ["mowing_area.value", "mowing_area"])),
 
-        activeZoneIds: anthbotActiveZoneIds(data)
+        activeZoneIds: anthbotActiveZoneIds(data),
+        regionMowing: anthbotToInt(anthbotFirstDefined(data, ["mow_region", "mow_region.value"])) === 1,
+        regionPoint: anthbotActiveRegionPoint(data)
     };
+}
+
+/**
+ * Точка авто-задания — та, что косилка получила в region_mow_start.
+ *
+ * Признак «идёт авто-задание» — это mow_region, а НЕ непустой points: как и active_area,
+ * поле переживает завершение задания и продолжает показывать точку прошлого. Проверено
+ * на живой Genie 800 23.08.2026.
+ *
+ * @param {Object} reported
+ * @returns {number[]|null} [x, y] в миллиметрах карты
+ */
+function anthbotActiveRegionPoint(reported) {
+    var points = anthbotGetPath(reported, "region_area.points");
+    if (!points || typeof points.length !== "number" || points.length === 0) {
+        return null;
+    }
+    var point = points[0];
+    if (!point || typeof point.length !== "number" || point.length < 2) {
+        return null;
+    }
+    var x = anthbotToInt(point[0]);
+    var y = anthbotToInt(point[1]);
+    return (x === null || y === null) ? null : [x, y];
 }
 
 /**

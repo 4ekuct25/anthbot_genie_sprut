@@ -133,6 +133,7 @@ info = {
         zonesLoadedAtMs: 0,
         zoneTouchedAtMs: 0,
         appliedZoneSignature: "",
+        appliedAutoZoneSignature: "",
         pollTask: undefined,
         pollArmedAtMs: 0,
         lastError: ""
@@ -587,6 +588,7 @@ function anthbotApplyState(state, reported, services, variables, options) {
 
     anthbotApplyZoneNames(services, variables);
     anthbotApplyActiveZones(services, state, variables, options);
+    anthbotApplyActiveAutoZones(services, state, variables, options);
     anthbotApplyDesktopDefaults(services, variables, options);
     anthbotApplyValueNames(services, options);
 }
@@ -648,6 +650,106 @@ function anthbotApplyActiveZones(services, state, variables, options) {
         const characteristic = anthbotValueCharacteristic(services["zone" + index]);
         anthbotWrite(characteristic, anthbotContainsId(active, zone.id), variables);
     }
+}
+
+// Насколько ближайшая авто-зона должна быть ближе следующей, чтобы выбор считался однозначным.
+// Координаты в разметке — в миллиметрах карты, поэтому 10 метров.
+//
+// Порог нужен потому, что якорь зоны в разметке и точка, которую косилка получает в задании,
+// НЕ совпадают: замерено 4,8 м у одной авто-зоны и 20,2 м у другой. То есть «ближайший якорь» —
+// это догадка, и на зонах, расположенных рядом, она ошибётся. Лучше не подсветить ничего,
+// чем подсветить не ту.
+const ANTHBOT_AUTO_ZONE_MARGIN_MM = 10000;
+
+/**
+ * Подсвечивает кнопку авто-зоны, которую косилка косит прямо сейчас.
+ *
+ * Прямого ответа «какая авто-зона» облако не даёт: active_area авто-задания не отражает вовсе
+ * (проверено тремя замерами), а region_area.points сообщает точку, которая с якорем зоны в
+ * разметке не совпадает. Поэтому зона определяется как ближайшая к этой точке — и только если
+ * следующая по удалённости дальше хотя бы на ANTHBOT_AUTO_ZONE_MARGIN_MM.
+ *
+ * Признак «идёт авто-задание» берётся из mow_region, а не из непустого points: точка, как и
+ * состав ручного задания, переживает завершение задания.
+ */
+function anthbotApplyActiveAutoZones(services, state, variables, options) {
+    const signature = state.regionMowing && state.regionPoint
+        ? state.regionPoint.join(",") : "";
+    if (signature === variables.appliedAutoZoneSignature) {
+        return;
+    }
+    if (anthbotZonesHeldByUser(variables)) {
+        return;
+    }
+
+    // Авто-задание кончилось — гасим подсветку, но только свою же
+    if (!signature) {
+        variables.appliedAutoZoneSignature = "";
+        anthbotWriteAutoZones(services, variables, -1);
+        return;
+    }
+
+    const nearest = anthbotNearestAutoZone(variables.autoZones, state.regionPoint);
+    variables.appliedAutoZoneSignature = signature;
+    if (nearest.index < 0) {
+        anthbotLog(options, "какая авто-зона косится — определить нельзя: " + nearest.reason);
+        return;
+    }
+    anthbotLog(options, "косится авто-зона [azone" + (nearest.index + 1) + "]");
+    anthbotWriteAutoZones(services, variables, nearest.index);
+}
+
+function anthbotWriteAutoZones(services, variables, activeIndex) {
+    for (let index = 1; index <= 16; index++) {
+        if (!variables.autoZones[index - 1]) {
+            continue;
+        }
+        const characteristic = anthbotValueCharacteristic(services["azone" + index]);
+        anthbotWrite(characteristic, index - 1 === activeIndex, variables);
+    }
+}
+
+/**
+ * Ближайшая к точке задания авто-зона — если выбор однозначен.
+ * @returns {{index: number, reason: string}} index < 0 означает «определить нельзя»
+ */
+function anthbotNearestAutoZone(autoZones, point) {
+    let bestIndex = -1;
+    let best = Infinity;
+    let second = Infinity;
+
+    for (let index = 0; index < autoZones.length; index++) {
+        const anchor = autoZones[index].points;
+        if (!anchor || !anchor[0] || anchor[0].length < 2) {
+            continue;
+        }
+        const distance = anthbotDistance(anchor[0], point);
+        if (distance < best) {
+            second = best;
+            best = distance;
+            bestIndex = index;
+        } else if (distance < second) {
+            second = distance;
+        }
+    }
+
+    if (bestIndex < 0) {
+        return { index: -1, reason: "у авто-зон в разметке нет координат" };
+    }
+    if (second - best < ANTHBOT_AUTO_ZONE_MARGIN_MM) {
+        return {
+            index: -1,
+            reason: "две авто-зоны почти одинаково близки (" + Math.round(best / 1000) + " и " +
+                Math.round(second / 1000) + " м) — подсветить наугад хуже, чем не подсвечивать"
+        };
+    }
+    return { index: bestIndex, reason: "" };
+}
+
+function anthbotDistance(a, b) {
+    const dx = a[0] - b[0];
+    const dy = a[1] - b[1];
+    return Math.sqrt(dx * dx + dy * dy);
 }
 
 /**

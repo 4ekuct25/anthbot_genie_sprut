@@ -110,6 +110,7 @@ function addMower(hub) {
       { type: HS.Switch, name: 'Зона 2 zone2', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Зона 3 zone3', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Авто-зона 1 azone1', characteristics: [{ type: HC.On, value: false }] },
+      { type: HS.Switch, name: 'Авто-зона 2 azone2', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Без метки', characteristics: [{ type: HC.On, value: false }] },
     ],
   });
@@ -796,6 +797,57 @@ describe('AnthbotGenie — что командой НЕ считается', () 
     for (let i = 0; i < 7; i++) ctx.time.advance('61s');
 
     expect(charByKey(mower, 'zone1', HC.On).getValue()).toBe(false);
+  });
+
+  it('косимая авто-зона определяется по ближайшему якорю', (ctx) => {
+    // Прямого ответа «какая авто-зона» облако не даёт: active_area авто-задания не отражает,
+    // а region_area.points сообщает точку, которая с якорем в разметке не совпадает —
+    // на живой Genie 800 расхождение было 4,8 и 20,2 метра у двух зон.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      mow_region: 1, region_area: { points: [[2380, -8129]] },
+    }), {
+      custom_areas: [{ id: 100, name: 'Перед домом' }],
+      region_areas: [
+        { id: 0, name: 'Клумба', x: 2469, y: -12965 },
+        { id: 1, name: 'Дальняя', x: 28004, y: -10503 },
+      ],
+    });
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'azone1', HC.On).getValue()).toBe(true);
+    expect(charByKey(mower, 'azone2', HC.On).getValue()).toBe(false);
+  });
+
+  it('две почти одинаково близкие авто-зоны не подсвечиваются вовсе', (ctx) => {
+    // Якорь в разметке и точка задания расходятся на метры, поэтому «ближайший» — догадка.
+    // На соседних зонах она ошибётся, а подсветить не ту хуже, чем не подсветить.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      mow_region: 1, region_area: { points: [[2380, -8129]] },
+    }), {
+      custom_areas: [{ id: 100, name: 'Перед домом' }],
+      region_areas: [
+        { id: 0, name: 'Клумба', x: 2469, y: -12965 },
+        { id: 1, name: 'Рядом', x: 2469, y: -16000 },
+      ],
+    });
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'azone1', HC.On).getValue()).toBe(false);
+    expect(charByKey(mower, 'azone2', HC.On).getValue()).toBe(false);
+  });
+
+  it('точка прошлого авто-задания подсветку не зажигает', (ctx) => {
+    // region_area.points, как и active_area, переживает завершение задания. Признак
+    // «идёт авто-задание» — это mow_region, иначе кнопка горела бы вечно после первого раза.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      mow_region: 0, region_area: { points: [[2380, -8129]] },
+    }), {
+      custom_areas: [{ id: 100, name: 'Перед домом' }],
+      region_areas: [{ id: 0, name: 'Клумба', x: 2469, y: -12965 }],
+    });
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'azone1', HC.On).getValue()).toBe(false);
   });
 
   it('подсветка зон командой косилке не становится', (ctx) => {
