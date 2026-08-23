@@ -229,6 +229,31 @@ describe('AnthbotGenie — зоны из разметки участка', () =>
     expect(scenario.call('anthbotAutoZones', [{ regions: [{ id: 9 }] }])[0].id).toBe(9);
   });
 
+  it('зоны выстраиваются по id, а не по порядку в файле', ({ scenario }) => {
+    // Разметка живой Genie 800: зоны лежат в порядке правок в приложении — 100, 101, 102,
+    // 104, 103, 105. Кнопки в хабе привязаны к позиции в списке, поэтому без сортировки
+    // zone4 получала имя «Zone 5», а zone5 — «Zone 4».
+    const zones = scenario.call('anthbotManualZones', [{
+      custom_areas: [
+        { id: 100, name: 'Zone 1' }, { id: 101, name: 'Zone 2' }, { id: 102, name: 'Zone 3' },
+        { id: 104, name: 'Zone 5' }, { id: 103, name: 'Zone 4' }, { id: 105, name: 'Zone 6' },
+      ],
+    }]);
+
+    expect(zones.map((z) => z.id)).toEqual([100, 101, 102, 103, 104, 105]);
+    expect(zones.map((z) => z.name)).toEqual(
+      ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4', 'Zone 5', 'Zone 6']);
+  });
+
+  it('зоны с одинаковым ключом сохраняют порядок файла', ({ scenario }) => {
+    // У зон без id ключом становится позиция в файле — сортировка обязана быть устойчивой,
+    // иначе безымянные зоны начнут переставляться между опросами
+    const zones = scenario.call('anthbotManualZones',
+      [{ custom_areas: [{ name: 'Первая' }, { name: 'Вторая' }] }]);
+
+    expect(zones.map((z) => z.name)).toEqual(['Первая', 'Вторая']);
+  });
+
   it('зона без имени получает подпись по порядку', ({ scenario }) => {
     expect(scenario.call('anthbotManualZones', [{ custom_areas: [{ id: 7 }] }])[0].name).toBe('Зона 1');
   });
