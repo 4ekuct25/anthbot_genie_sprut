@@ -105,7 +105,7 @@ function addMower(hub) {
       { type: HS.C_Option, name: 'Прошивка fw', characteristics: [{ type: HC.C_String, value: '' }] },
       { type: HS.C_Option, name: 'Карта mapstate', characteristics: [{ type: HC.C_String, value: '' }] },
       { type: HS.C_Option, name: 'Площадь карты maparea', characteristics: [{ type: HC.C_Integer, value: 0 }] },
-      { type: HS.C_Option, name: 'Время сессии time', characteristics: [{ type: HC.C_Integer, value: 0 }] },
+      { type: HS.C_Option, name: 'Время задания time', characteristics: [{ type: HC.C_Integer, value: 0 }] },
       { type: HS.Switch, name: 'Зона 1 zone1', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Зона 2 zone2', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Зона 3 zone3', characteristics: [{ type: HC.On, value: false }] },
@@ -850,8 +850,8 @@ describe('AnthbotGenie — значение в названии сервиса',
 
     expect(String(serviceByKey(mower, 'status').getName())).toBe('Косит весь газон status');
     expect(String(serviceByKey(mower, 'height').getName())).toBe('Высота 45 мм height');
-    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время сессии 25 мин time');
-    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время сессии 25 мин time');
+    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время задания 25 мин time');
+    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время задания 25 мин time');
   });
 
   it('ключ остаётся последним словом — привязка не ломается', (ctx) => {
@@ -967,13 +967,13 @@ describe('AnthbotGenie — значение в названии сервиса',
     // Иначе в карточке навсегда застревает значение, каким оно было в момент скрытия
     mockCloud(ctx.http);
     const { mower } = startScenario(ctx);
-    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время сессии 25 мин time');
+    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время задания 25 мин time');
 
     // Владелец хаба спрятал плитку — следующий же опрос должен убрать значение из имени
     serviceByKey(mower, 'time').setVisible(false);
     ctx.time.advance('61s');
 
-    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время сессии time');
+    expect(String(serviceByKey(mower, 'time').getName())).toBe('Время задания time');
   });
 
   it('при выключенной опции имена не трогаются', (ctx) => {

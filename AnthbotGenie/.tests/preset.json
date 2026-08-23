@@ -106,7 +106,7 @@
         },
         {
           "type": "C_Option",
-          "name": "Время сессии, мин [time]",
+          "name": "Время задания, мин [time]",
           "characteristics": [{ "type": "C_Integer", "value": 0 }]
         },
         {
