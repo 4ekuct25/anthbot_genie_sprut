@@ -31,7 +31,10 @@ const scenarioDescription = {
 info = {
     name: scenarioName.ru,
     description: scenarioDescription.ru,
-    version: "1.0",
+    // Версия растёт с каждой заливкой в хаб. Иначе в интерфейсе не отличить залитое
+    // от прежнего: 24.08.2026 на этом потеряли полдня, доказывая косвенными признаками,
+    // какой код на самом деле работает.
+    version: "1.1",
     author: "@s.panchenko",
     onStart: true,
     sourceServices: [HS.Switch, HS.C_Option],
