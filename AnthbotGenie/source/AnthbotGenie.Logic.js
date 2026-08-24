@@ -150,9 +150,10 @@ info = {
         zones: [],
         autoZones: [],
         zonesLoadedAtMs: 0,
-        historyLoadedAtMs: 0,
+        historyNextAtMs: 0,
         historyTotals: null,
         historyTruncatedReported: false,
+        historyError: "",
         staleReported: false,
         zoneTouchedAtMs: 0,
         appliedZoneSignature: "",
@@ -627,6 +628,11 @@ function anthbotLoadZones(variables, options) {
 // читать её чаще раза в час нечего, тем более что это отдельный запрос на каждую страницу.
 const ANTHBOT_HISTORY_REFRESH_MS = 60 * 60 * 1000;
 
+// Через сколько повторять после отказа. Отдельный интервал нужен потому, что отказ бывает
+// временным: на живом хабе 24.08.2026 облако отдало на этот эндпоинт HTTP 503, и часовой
+// перерыв означал бы час пустой плитки из-за единственной неудачной секунды.
+const ANTHBOT_HISTORY_RETRY_MS = 5 * 60 * 1000;
+
 /**
  * Читает историю завершённых заданий и складывает из неё итоги за всё время.
  *
@@ -635,16 +641,28 @@ const ANTHBOT_HISTORY_REFRESH_MS = 60 * 60 * 1000;
  * пустая плитка вместо вчерашнего числа выглядит как «наработки нет», то есть как ложь.
  */
 function anthbotLoadHistory(variables, options) {
-    if (variables.historyLoadedAtMs &&
-        (anthbotNowMs() - variables.historyLoadedAtMs) < ANTHBOT_HISTORY_REFRESH_MS) {
+    if (variables.historyNextAtMs && anthbotNowMs() < variables.historyNextAtMs) {
         return;
     }
 
     const history = global.anthbotMowingHistory(variables.session.token, variables.session.sn);
-    variables.historyLoadedAtMs = anthbotNowMs();
     if (!history.ok) {
-        anthbotLog(options, "история заданий недоступна: " + history.error);
+        // Повторяем скоро, а не через час: отказ облака на этом эндпоинте бывает временным.
+        variables.historyNextAtMs = anthbotNowMs() + ANTHBOT_HISTORY_RETRY_MS;
+        // В обычный лог, а не только в отладочный: без этого владелец хаба видит пустую
+        // плитку наработки и не знает, что причина в облаке. Повторяется только при смене
+        // причины — иначе одно и то же сообщение засоряло бы лог каждые пять минут.
+        if (variables.historyError !== history.error) {
+            variables.historyError = history.error;
+            console.warn("[Anthbot] история заданий недоступна: " + history.error);
+        }
         return;
+    }
+
+    variables.historyNextAtMs = anthbotNowMs() + ANTHBOT_HISTORY_REFRESH_MS;
+    if (variables.historyError) {
+        variables.historyError = "";
+        console.info("[Anthbot] история заданий снова читается");
     }
 
     const totals = global.anthbotMowingHistoryTotals(history.records);

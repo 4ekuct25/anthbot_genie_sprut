@@ -1256,6 +1256,40 @@ describe('AnthbotGenie — история заданий', () => {
     expect(logged).not.toContain('SECRET');
   });
 
+  it('после отказа облака история пробуется снова через пять минут, а не через час', (ctx) => {
+    // Живой случай 24.08.2026: облако отдало на этот эндпоинт HTTP 503. Часовой перерыв
+    // означал бы час пустой плитки из-за одной неудачной секунды.
+    let reads = 0;
+    ctx.http.mock.on((req) => {
+      if (req.method !== 'GET' || req.url.indexOf('/api/v1/device/area') < 0) return false;
+      reads += 1;
+      return reads === 1;
+    }, { status: 503, body: '' });
+    mockCloud(ctx.http);
+    const { mower } = startScenario(ctx);
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(0);
+
+    // Через минуту повтора ещё нет, через шесть — есть, и наработка встала
+    ctx.time.advance('61s');
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(0);
+    ctx.time.advance('301s');
+
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(90);
+  });
+
+  it('об отказе истории сказано в обычный лог и ровно один раз', (ctx) => {
+    // Без этого владелец хаба видит пустую плитку и не знает, что причина в облаке.
+    // А повтор той же причины каждые пять минут превратил бы лог в мусор.
+    ctx.http.mock.onGet(`${API}/api/v1/device/area`, { status: 503, body: '' });
+    mockCloud(ctx.http);
+    startScenario(ctx);
+    ctx.time.advance('301s');
+    ctx.time.advance('301s');
+
+    expect(ctx.logs.containing('история заданий недоступна')).toHaveLength(1);
+    expect(ctx.logs.containing('503').length).toBeGreaterThan(0);
+  });
+
   it('неполная история отмечается предупреждением, а не тихой недостачей', (ctx) => {
     // Итоги при упоре в предел страниц меньше настоящих — молчать об этом нельзя.
     const full = [];
