@@ -34,7 +34,7 @@ info = {
     // Версия растёт с каждой заливкой в хаб. Иначе в интерфейсе не отличить залитое
     // от прежнего: 24.08.2026 на этом потеряли полдня, доказывая косвенными признаками,
     // какой код на самом деле работает.
-    version: "1.3",
+    version: "1.4",
     author: "@s.panchenko",
     onStart: true,
     sourceServices: [HS.Switch, HS.C_Option],
@@ -157,6 +157,7 @@ info = {
         historyTotals: null,
         historyTruncatedReported: false,
         historyError: "",
+        historyVariant: "",
         lastErrorCode: null,
         staleReported: false,
         zoneTouchedAtMs: 0,
@@ -679,6 +680,13 @@ function anthbotLoadHistory(variables, options) {
         console.warn("[Anthbot] история заданий прочитана не целиком: " + history.pages +
                      " страниц, " + totals.count + " заданий. Наработка за всё время " +
                      "посчитана по прочитанному и меньше настоящей");
+    }
+
+    // Сработавший запасной вариант — в обычный лог: это единственный способ узнать,
+    // что именно не нравится облаку в обычном запросе от хаба.
+    if (history.variant && variables.historyVariant !== history.variant) {
+        variables.historyVariant = history.variant;
+        console.info("[Anthbot] история заданий прочитана запасным способом: " + history.variant);
     }
 
     anthbotLog(options, "история заданий: " + totals.count + " заданий, наработка " +

@@ -578,6 +578,13 @@ function anthbotCloudRequest(method, path, opts) {
     if (options.token) {
         request.header("Authorization", options.token);
     }
+    if (options.headers) {
+        for (var name in options.headers) {
+            if (options.headers.hasOwnProperty(name)) {
+                request.header(name, options.headers[name]);
+            }
+        }
+    }
     if (options.jsonBody) {
         request.header("content-type", "application/json");
         request.body(JSON.stringify(options.jsonBody));
@@ -1004,14 +1011,15 @@ function anthbotRecordRows(data) {
  * @param {number} [pageSize]
  * @returns {Object} { ok, records, rows, pageSize } либо { ok:false, error, status }
  */
-function anthbotMowingRecordsPage(token, serialNumber, page, pageSize) {
+function anthbotMowingRecordsPage(token, serialNumber, page, pageSize, headers) {
     var size = Math.max(1, Math.min(Number(pageSize) || ANTHBOT_RECORDS_PAGE_SIZE, 200));
     var num = Math.max(1, Math.round(Number(page) || 1));
 
     var result = anthbotCloudRequest("GET", "/api/v1/device/area", {
         token: token,
         query: "sn=" + anthbotUriEncode(serialNumber, true) +
-               "&pagenum=" + num + "&pagesize=" + size
+               "&pagenum=" + num + "&pagesize=" + size,
+        headers: headers
     });
     if (!result.ok) {
         return result;
@@ -1049,14 +1057,45 @@ function anthbotMowingRecordsPage(token, serialNumber, page, pageSize) {
  * @param {number} [maxPages]
  * @returns {Object} { ok, records, pages, truncated } либо { ok:false, error, status }
  */
+// Чем пробовать снова, когда облако отвечает 5xx. Проверено на живом 24.08.2026: облако
+// отдаёт хабу HTTP 503 на этот эндпоинт, отвечая при этом 200 на тот же запрос из разведки
+// (curl, тот же дом, тот же токен, те же заголовки). Значит дело в том, КАК спрашивает клиент
+// хаба, а не в самом запросе. Что именно не нравится облаку — неизвестно, поэтому варианты
+// перебираются: сначала лёгкая страница, потом отказ от сжатия, потом одноразовое соединение.
+// Тот вариант, который сработал, попадает в лог — так список сам себя уточнит на живой машине.
+var ANTHBOT_HISTORY_FALLBACKS = [
+    { name: "страница на 10 записей", pageSize: 10, headers: null },
+    { name: "без сжатия", pageSize: 10, headers: { "Accept-Encoding": "identity" } },
+    { name: "одноразовое соединение", pageSize: 10, headers: { "Connection": "close" } }
+];
+
 function anthbotMowingHistory(token, serialNumber, maxPages) {
     var limit = Math.max(1, Math.round(Number(maxPages) || ANTHBOT_RECORDS_MAX_PAGES));
     var records = [];
     var pages = 0;
     var rawFirst = null;
 
+    var variant = "";
+    var pageSize = ANTHBOT_RECORDS_PAGE_SIZE;
+    var headers = null;
+
     for (var page = 1; page <= limit; page++) {
-        var result = anthbotMowingRecordsPage(token, serialNumber, page, ANTHBOT_RECORDS_PAGE_SIZE);
+        var result = anthbotMowingRecordsPage(token, serialNumber, page, pageSize, headers);
+
+        // Пятисотые — это отказ облака, а не наша ошибка: пробуем спросить иначе. Перебор
+        // только на первой странице: если середина обхода рассыпалась, итог всё равно неполный.
+        if (!result.ok && page === 1 && result.status >= 500) {
+            for (var f = 0; f < ANTHBOT_HISTORY_FALLBACKS.length && !result.ok; f++) {
+                var fallback = ANTHBOT_HISTORY_FALLBACKS[f];
+                result = anthbotMowingRecordsPage(token, serialNumber, 1,
+                                                  fallback.pageSize, fallback.headers);
+                if (result.ok) {
+                    variant = fallback.name;
+                    pageSize = fallback.pageSize;
+                    headers = fallback.headers;
+                }
+            }
+        }
         if (!result.ok) {
             // Первая страница не прочиталась — сообщаем отказ. Оборвавшаяся вторая оставляет
             // неполные итоги, которые выглядели бы как «часть заданий пропала», поэтому
@@ -1071,12 +1110,12 @@ function anthbotMowingHistory(token, serialNumber, maxPages) {
             records.push(result.records[i]);
         }
         if (result.rows < result.pageSize) {
-            return { ok: true, records: records, pages: pages, truncated: false, rawFirst: rawFirst };
+            return { ok: true, records: records, pages: pages, truncated: false, rawFirst: rawFirst, variant: variant };
         }
     }
     // Предел страниц исчерпан, а последняя страница была полной: итоги считаются по прочитанному.
     // Молчать об этом нельзя — иначе «наработка всего» тихо окажется наработкой за часть истории.
-    return { ok: true, records: records, pages: pages, truncated: true, rawFirst: rawFirst };
+    return { ok: true, records: records, pages: pages, truncated: true, rawFirst: rawFirst, variant: variant };
 }
 
 /**
