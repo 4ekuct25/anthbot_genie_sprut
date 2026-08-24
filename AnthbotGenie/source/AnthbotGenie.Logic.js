@@ -131,6 +131,9 @@ info = {
         zones: [],
         autoZones: [],
         zonesLoadedAtMs: 0,
+        historyLoadedAtMs: 0,
+        historyTotals: null,
+        historyTruncatedReported: false,
         zoneTouchedAtMs: 0,
         appliedZoneSignature: "",
         appliedAutoZoneSignature: "",
@@ -490,6 +493,7 @@ function anthbotPoll(accessory, variables, options) {
     anthbotLog(options, "Состояние: " + JSON.stringify(shadow.reported));
 
     anthbotLoadZones(variables, options);
+    anthbotLoadHistory(variables, options);
     anthbotApplyState(global.anthbotMapReported(shadow.reported), shadow.reported, services, variables, options);
 }
 
@@ -549,6 +553,53 @@ function anthbotLoadZones(variables, options) {
     anthbotLog(options, "зон: " + variables.zones.length + ", авто-зон: " + variables.autoZones.length);
 }
 
+// История заданий нужна только для наработки за всё время и растёт на одну запись за задание —
+// читать её чаще раза в час нечего, тем более что это отдельный запрос на каждую страницу.
+const ANTHBOT_HISTORY_REFRESH_MS = 60 * 60 * 1000;
+
+/**
+ * Читает историю завершённых заданий и складывает из неё итоги за всё время.
+ *
+ * Наработку и площадь за всё время Genie 800 в состоянии не передаёт, а облако хранит
+ * список заданий — итоги считаются по нему. Прежние итоги при отказе не стираются:
+ * пустая плитка вместо вчерашнего числа выглядит как «наработки нет», то есть как ложь.
+ */
+function anthbotLoadHistory(variables, options) {
+    if (variables.historyLoadedAtMs &&
+        (anthbotNowMs() - variables.historyLoadedAtMs) < ANTHBOT_HISTORY_REFRESH_MS) {
+        return;
+    }
+
+    const history = global.anthbotMowingHistory(variables.session.token, variables.session.sn);
+    variables.historyLoadedAtMs = anthbotNowMs();
+    if (!history.ok) {
+        anthbotLog(options, "история заданий недоступна: " + history.error);
+        return;
+    }
+
+    const totals = global.anthbotMowingHistoryTotals(history.records);
+    variables.historyTotals = totals;
+
+    // О неполной истории говорим в обычный лог, а не в отладочный: итоги в этом случае
+    // меньше настоящих, и знать об этом нужно тому, кто смотрит на плитку, а не отладчику.
+    if (history.truncated && !variables.historyTruncatedReported) {
+        variables.historyTruncatedReported = true;
+        console.warn("[Anthbot] история заданий прочитана не целиком: " + history.pages +
+                     " страниц, " + totals.count + " заданий. Наработка за всё время " +
+                     "посчитана по прочитанному и меньше настоящей");
+    }
+
+    anthbotLog(options, "история заданий: " + totals.count + " заданий, наработка " +
+               totals.timeSec + " с, площадь " + totals.areaM2 + " кв м; последнее задание: " +
+               JSON.stringify(totals.last));
+
+    // Имена полей — но не значения: по именам видно, что поправить в разборе, если у вашей
+    // модели они другие, а среди значений едут подписанные ссылки на файлы задания.
+    if (history.rawFirst) {
+        anthbotLog(options, "поля записи истории: " + anthbotKeysOf(history.rawFirst).join(", "));
+    }
+}
+
 // ============================================================================
 // Состояние косилки → характеристики
 // ============================================================================
@@ -583,8 +634,13 @@ function anthbotApplyState(state, reported, services, variables, options) {
     anthbotWriteServiceValue(services, "fw", anthbotAsText(state.firmware), variables);
     anthbotWriteServiceValue(services, "time", anthbotSecondsToMinutes(state.mowingTime), variables);
     anthbotWriteServiceValue(services, "area", state.mowingArea, variables);
-    anthbotWriteServiceValue(services, "timetotal", anthbotSecondsToMinutes(state.mowingTimeTotal), variables);
-    anthbotWriteServiceValue(services, "areatotal", state.mowingAreaTotal, variables);
+    // Наработка за всё время: своё значение косилки важнее посчитанного нами. У Genie 800
+    // этих полей в состоянии нет вовсе (проверено на живой, прошивка 1.20.9), у M5/M9 они есть —
+    // и там сумма по истории облака была бы вторым источником правды для того же числа.
+    anthbotWriteServiceValue(services, "timetotal",
+        anthbotSecondsToMinutes(anthbotTotalFor(state.mowingTimeTotal, variables, "timeSec")), variables);
+    anthbotWriteServiceValue(services, "areatotal",
+        anthbotTotalFor(state.mowingAreaTotal, variables, "areaM2"), variables);
 
     anthbotApplyZoneNames(services, variables);
     anthbotApplyActiveZones(services, state, variables, options);
@@ -796,7 +852,7 @@ function anthbotIsZoneKey(key) {
 // Порядок плиток задаётся порядком создания сервисов и в интерфейсе меняется только вручную,
 // поэтому единственный способ получить читаемый стол — не выводить на него лишнее.
 const ANTHBOT_DESKTOP_HIDDEN_KEYS = "refresh volume dirauto rain raintime nest nestcount " +
-    "nestheight nestcheck nestlevel rtk ip ssid fw mapstate maparea";
+    "nestheight nestcheck nestlevel rtk ip ssid fw mapstate maparea timetotal areatotal";
 
 /**
  * Один раз убирает редкие сервисы с рабочего стола — при первом опросе после запуска сценария.
@@ -836,7 +892,10 @@ const ANTHBOT_NAME_LABELS = {
     // перерыв на зарядку. Проверено на живой Genie 800 23.08.2026 — у задания, шедшего через
     // подзарядку, здесь было 147 минут при 34 минутах с момента выезда с базы; обнулились оба
     // только со стартом следующего задания. Подпись «сессия» обещала бы время текущего выезда.
-    time: "Время задания", area: "Площадь задания"
+    time: "Время задания", area: "Площадь задания",
+    // Подписи короче, чем «Наработка всего» и «Площадь всего»: имя сервиса вместе с ключом
+    // и значением обязано укладываться в 32 символа, а хвост здесь длинный — «timetotal».
+    timetotal: "Наработка", areatotal: "Скошено"
 };
 
 // Единицы записаны буквами: хаб вырезает из имени сервиса знаки препинания и надстрочные
@@ -845,7 +904,8 @@ const ANTHBOT_NAME_LABELS = {
 // но написанное буквами хотя бы доезжает до экрана целиком.
 const ANTHBOT_NAME_UNITS = {
     height: " мм", volume: " %", dir: " град", raintime: " ч",
-    nestheight: " мм", maparea: " кв м", time: " мин", area: " кв м"
+    nestheight: " мм", maparea: " кв м", time: " мин", area: " кв м",
+    timetotal: " мин", areatotal: " кв м"
 };
 
 // Всё, что хаб может выбросить из имени, выбрасываем и мы — перед сравнением, не в самом имени
@@ -1000,6 +1060,33 @@ function anthbotApplyZoneNamesFor(services, zones, prefix, label) {
             service.setName(expectedName);
         }
     }
+}
+
+/**
+ * Значение «за всё время»: из состояния косилки, а при его отсутствии — из истории облака.
+ *
+ * @param {number|null} reportedValue значение из состояния косилки
+ * @param {Object} variables
+ * @param {string} totalsField поле итогов истории: timeSec или areaM2
+ * @returns {number|null}
+ */
+function anthbotTotalFor(reportedValue, variables, totalsField) {
+    if (reportedValue !== null && reportedValue !== undefined) {
+        return reportedValue;
+    }
+    const totals = variables.historyTotals;
+    return totals ? totals[totalsField] : null;
+}
+
+/** Имена полей объекта по алфавиту — для лога, где значения показывать нельзя. */
+function anthbotKeysOf(object) {
+    const keys = [];
+    for (const key in object) {
+        if (object.hasOwnProperty(key)) {
+            keys.push(key);
+        }
+    }
+    return keys.sort();
 }
 
 function anthbotSecondsToHours(seconds) {

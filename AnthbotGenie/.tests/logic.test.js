@@ -53,6 +53,12 @@ const AREA = {
   ],
 };
 
+// История заданий: два завершённых задания — 5400 секунд (90 минут) и 310 кв м суммой.
+const HISTORY = [
+  { record_id: 1, start_time: '2026-08-20 10:00:00', mow_time: 3600, mow_area: 200 },
+  { record_id: 2, start_time: '2026-08-22 09:00:00', mow_time: 1800, mow_area: 110 },
+];
+
 function envelope(data) {
   return { status: 200, body: JSON.stringify({ code: 0, msg: 'ok', data: data }) };
 }
@@ -68,6 +74,7 @@ function mockCloud(http, reported, area) {
     access_key_id: 'ASIATEST', secret_access_key: 'secret', session_token: 'token',
     region_name: 'eu-central-1', endpoint: ENDPOINT, expiration: 3600,
   }));
+  http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: HISTORY }));
   http.mock.onGet(`${API}/api/v1/device/v2/presigned_url`,
     envelope({ presigned_url: 'https://s3.example.com/area.txt' }));
   http.mock.onGet('https://s3.example.com/area.txt',
@@ -106,6 +113,8 @@ function addMower(hub) {
       { type: HS.C_Option, name: 'Карта mapstate', characteristics: [{ type: HC.C_String, value: '' }] },
       { type: HS.C_Option, name: 'Площадь карты maparea', characteristics: [{ type: HC.C_Integer, value: 0 }] },
       { type: HS.C_Option, name: 'Время задания time', characteristics: [{ type: HC.C_Integer, value: 0 }] },
+      { type: HS.C_Option, name: 'Наработка всего timetotal', characteristics: [{ type: HC.C_Integer, value: 0 }] },
+      { type: HS.C_Option, name: 'Площадь всего areatotal', characteristics: [{ type: HC.C_Integer, value: 0 }] },
       { type: HS.Switch, name: 'Зона 1 zone1', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Зона 2 zone2', characteristics: [{ type: HC.On, value: false }] },
       { type: HS.Switch, name: 'Зона 3 zone3', characteristics: [{ type: HC.On, value: false }] },
@@ -947,6 +956,9 @@ describe('AnthbotGenie — значение в названии сервиса',
     expect(serviceByKey(mower, 'raintime').isVisible()).toBe(false);
     expect(serviceByKey(mower, 'ip').isVisible()).toBe(false);
     expect(serviceByKey(mower, 'maparea').isVisible()).toBe(false);
+    // Итоги за всё время меняются раз в задание — на столе им места не нужно
+    expect(serviceByKey(mower, 'timetotal').isVisible()).toBe(false);
+    expect(serviceByKey(mower, 'areatotal').isVisible()).toBe(false);
     // Управление, состояние и зоны на столе остаются
     expect(serviceByKey(mower, 'mow').isVisible()).toBe(true);
     expect(serviceByKey(mower, 'status').isVisible()).toBe(true);
@@ -1042,6 +1054,96 @@ describe('AnthbotGenie — значение в названии сервиса',
     const { mower } = startScenario(ctx);
 
     expect(String(serviceByKey(mower, 'mapstate').getName())).toBe('Карта mapstate');
+  });
+});
+
+describe('AnthbotGenie — история заданий', () => {
+  const historyReads = (ctx) =>
+    ctx.http.requests.filter((r) => r.url.indexOf('/api/v1/device/area') >= 0);
+
+  it('наработка за всё время берётся из истории, когда косилка её не отдаёт', (ctx) => {
+    // Genie 800 полей mowing_time / mowing_area в состоянии не имеет вовсе, поэтому
+    // единственный источник наработки за всё время — список заданий в облаке.
+    mockCloud(ctx.http);
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(90);
+    expect(charByKey(mower, 'areatotal', HC.C_Integer).getValue()).toBe(310);
+  });
+
+  it('своя наработка косилки историю не переписывает', (ctx) => {
+    // У M5/M9 эти поля есть. Показывать вместо них свою сумму — значит держать два источника
+    // правды для одного числа и показывать то, которое посчитали мы, а не косилка.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, {
+      mowing_time: { value: 7200 }, mowing_area: { value: 900 },
+    }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(120);
+    expect(charByKey(mower, 'areatotal', HC.C_Integer).getValue()).toBe(900);
+  });
+
+  it('история читается раз в час, а не на каждый опрос', (ctx) => {
+    mockCloud(ctx.http);
+    startScenario(ctx);
+
+    ctx.time.advance('61s');
+    ctx.time.advance('61s');
+    expect(historyReads(ctx)).toHaveLength(1);
+
+    ctx.time.advance('3601s');
+    expect(historyReads(ctx).length).toBeGreaterThan(1);
+  });
+
+  it('отказ истории не рвёт опрос и не гасит наработку', (ctx) => {
+    // Пустая плитка вместо вчерашнего числа читается как «наработки нет», то есть врёт.
+    // Правило-счётчик регистрируется первым: матчер отдаёт первое подошедшее правило.
+    let reads = 0;
+    ctx.http.mock.on((req) => {
+      if (req.method !== 'GET' || req.url.indexOf('/api/v1/device/area') < 0) return false;
+      reads += 1;
+      return reads > 1;
+    }, { status: 502, body: 'bad gateway' });
+    mockCloud(ctx.http);
+    const { mower, variables } = startScenario(ctx);
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(90);
+
+    // Часа мало: опрос идёт раз в минуту, и последний опрос внутри ровно часа приходится
+    // на 3600-ю секунду — с начала истории тогда прошло 3599 секунд, обновление ещё не время.
+    ctx.time.advance('3721s');
+
+    expect(charByKey(mower, 'timetotal', HC.C_Integer).getValue()).toBe(90);
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+    // Плитку от гашения защищает и слой записи: null в характеристику не пишется. Поэтому
+    // сохранность самих итогов проверяется там, где она живёт, — иначе проверка проходит
+    // по чужой причине и не заметит, что итоги обнулились.
+    expect(variables.historyTotals.timeSec).toBe(5400);
+  });
+
+  it('отладочный лог показывает имена полей записи, но не подписанные ссылки', (ctx) => {
+    // Форма ответа не проверена на живом облаке, и README обещает: что пришло — видно в логе.
+    // Значения при этом показывать нельзя: в area_url/map_url/path_url уходит серийник и подпись.
+    ctx.http.mock.onGet(`${API}/api/v1/device/area`, envelope({
+      list: [{ record_id: 5, mow_time: 600, mow_area: 30, area_url: 'area_SECRET.txt?sig=SECRET' }],
+    }));
+    mockCloud(ctx.http);
+    startScenario(ctx, { debug: true });
+
+    const logged = ctx.logs.all().map((entry) => entry.message).join(' ');
+    expect(logged).toContain('поля записи истории: area_url, mow_area, mow_time, record_id');
+    expect(logged).not.toContain('SECRET');
+  });
+
+  it('неполная история отмечается предупреждением, а не тихой недостачей', (ctx) => {
+    // Итоги при упоре в предел страниц меньше настоящих — молчать об этом нельзя.
+    const full = [];
+    for (let i = 0; i < 50; i++) full.push({ record_id: i, mow_time: 60, mow_area: 1 });
+    ctx.http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: full }));
+    mockCloud(ctx.http);
+    startScenario(ctx);
+
+    expect(historyReads(ctx)).toHaveLength(10);
+    expect(ctx.logs.containing('не целиком')).not.toHaveLength(0);
   });
 });
 
