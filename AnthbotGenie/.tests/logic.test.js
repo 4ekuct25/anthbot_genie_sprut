@@ -1084,6 +1084,46 @@ describe('AnthbotGenie — значение в названии сервиса',
   });
 });
 
+describe('AnthbotGenie — ошибки косилки', () => {
+  it('код 2012 показывается словами: косилка застряла', (ctx) => {
+    // Подтверждено на живой Genie 800 24.08.2026: при этом коде приложение Anthbot
+    // писало «The machine is stuck».
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { err_code: 2012 }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'error', HC.C_String).getValue()).toBe('Косилка застряла');
+  });
+
+  it('незнакомый код остаётся числом, а не выдуманным текстом', (ctx) => {
+    // Открытые таблицы кодов наполовину угаданы: показать неверную расшифровку хуже,
+    // чем показать голую цифру.
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { err_code: 777 }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'error', HC.C_String).getValue()).toBe('Ошибка 777');
+  });
+
+  it('появление ошибки попадает в обычный лог один раз, снятие — тоже', (ctx) => {
+    // Плитки достаточно, только если на неё смотрят; в логе останется момент начала.
+    let reads = 0;
+    ctx.http.mock.on((req) => {
+      if (req.method !== 'GET' || req.url.indexOf('/shadow?name=property') < 0) return false;
+      reads += 1;
+      return reads > 2;
+    }, { status: 200, body: JSON.stringify({ state: { reported: REPORTED } }) });
+    mockCloud(ctx.http, Object.assign({}, REPORTED, { err_code: 2012 }));
+    startScenario(ctx);
+
+    ctx.time.advance('61s');
+    expect(ctx.logs.containing('косилка сообщает об ошибке')).toHaveLength(1);
+    // В той же строке — из какого поля код: иначе спор «а то ли поле мы читаем» не закрыть
+    expect(ctx.logs.containing('err_code=2012').length).toBeGreaterThan(0);
+
+    ctx.time.advance('61s');
+    expect(ctx.logs.containing('ошибка снята').length).toBeGreaterThan(0);
+  });
+});
+
 describe('AnthbotGenie — потеря связи с косилкой', () => {
   /** Полный контур облака, но косилка молчит уже ageSec секунд. */
   function mockStale(ctx, ageSec, reported) {
