@@ -90,6 +90,25 @@ info = {
                 en: "How often to poll the cloud. Below 30 seconds is rarely useful"
             }
         },
+        staleMinutes: {
+            type: "Integer",
+            value: 15,
+            minValue: 0,
+            maxValue: 240,
+            step: 5,
+            name: { ru: "Считать связь потерянной через, мин", en: "Treat link as lost after, min" },
+            desc: {
+                ru: "Облако отдаёт последнее известное состояние и после того, как косилка пропала: " +
+                    "карточка показывает «косит» у машины, которая уже не косит. Если косилка не " +
+                    "выходила на связь дольше этого времени, статус скажет о потере связи. " +
+                    "На базе порог автоматически в 24 раза больше — стоящая на базе косилка " +
+                    "молчит часами, и это нормально. 0 — не проверять",
+                en: "The cloud keeps serving the last known state after the mower is gone, so the " +
+                    "card shows «mowing» for a mower that no longer mows. If the mower has not " +
+                    "reported for longer than this, the status says the link is lost. While docked " +
+                    "the threshold is 24× larger — a docked mower is quiet for hours. 0 — never check"
+            }
+        },
         commandViaShadow: {
             type: "Boolean",
             value: false,
@@ -134,6 +153,7 @@ info = {
         historyLoadedAtMs: 0,
         historyTotals: null,
         historyTruncatedReported: false,
+        staleReported: false,
         zoneTouchedAtMs: 0,
         appliedZoneSignature: "",
         appliedAutoZoneSignature: "",
@@ -494,7 +514,57 @@ function anthbotPoll(accessory, variables, options) {
 
     anthbotLoadZones(variables, options);
     anthbotLoadHistory(variables, options);
-    anthbotApplyState(global.anthbotMapReported(shadow.reported), shadow.reported, services, variables, options);
+
+    const state = global.anthbotMapReported(shadow.reported);
+    state.staleMs = anthbotStaleMs(shadow.updatedAtMs, state, variables, options);
+    anthbotApplyState(state, shadow.reported, services, variables, options);
+}
+
+// Во сколько раз порог мягче, когда косилка стоит на базе. На базе она засыпает и молчит
+// часами — считать это потерей связи означало бы каждую ночь показывать тревогу на ровном месте.
+const ANTHBOT_STALE_DOCKED_FACTOR = 24;
+
+/**
+ * Насколько состояние протухло, если протухло.
+ *
+ * Возвращает возраст состояния в миллисекундах, когда косилка молчит дольше порога, и null,
+ * когда всё в порядке, проверка выключена или судить не по чему. Отрицательный возраст —
+ * это часы хаба впереди облачных, а не свежесть из будущего: такой случай считается нормой,
+ * иначе расхождение часов навсегда включило бы тревогу.
+ *
+ * @param {number|null} updatedAtMs когда косилка в последний раз выходила на связь
+ * @param {Object} state состояние косилки
+ * @param {Object} variables
+ * @param {Object} options
+ * @returns {number|null}
+ */
+function anthbotStaleMs(updatedAtMs, state, variables, options) {
+    const limitMinutes = Number(options.staleMinutes);
+    if (!limitMinutes || limitMinutes <= 0 || updatedAtMs === null || updatedAtMs === undefined) {
+        return null;
+    }
+
+    const factor = state.activity === "docked" ? ANTHBOT_STALE_DOCKED_FACTOR : 1;
+    const limitMs = limitMinutes * 60000 * factor;
+    const age = anthbotNowMs() - updatedAtMs;
+    anthbotLog(options, "состояние обновлялось " + Math.round(age / 60000) + " мин назад " +
+               "(порог " + Math.round(limitMs / 60000) + " мин)");
+
+    if (age <= limitMs) {
+        // О восстановлении связи говорим в обычный лог: пропажа туда же и попала
+        if (variables.staleReported) {
+            variables.staleReported = false;
+            console.info("[Anthbot] косилка снова выходит на связь");
+        }
+        return null;
+    }
+
+    if (!variables.staleReported) {
+        variables.staleReported = true;
+        console.warn("[Anthbot] косилка не выходила на связь " + Math.round(age / 60000) +
+                     " мин; в карточке остаётся последнее известное состояние");
+    }
+    return age;
 }
 
 /**
@@ -1017,7 +1087,27 @@ function anthbotStatusLine(state) {
     if (state.online === false) {
         return "Недоступна (нет связи с облаком)";
     }
+    // Последнее известное состояние из строки не выбрасывается: «косила, когда пропала» —
+    // это то, с чего начинают поиски застрявшей косилки.
+    if (state.staleMs) {
+        return "Связь потеряна " + anthbotAgeText(state.staleMs) + " назад (было: " +
+               state.statusText + ")";
+    }
     return state.statusText;
+}
+
+/**
+ * Возраст словами: до полутора часов в минутах, дальше в часах — «97 мин» на плитке
+ * читается хуже, чем «2 ч».
+ * @param {number} ms
+ * @returns {string}
+ */
+function anthbotAgeText(ms) {
+    const minutes = Math.round(ms / 60000);
+    if (minutes < 90) {
+        return minutes + " мин";
+    }
+    return Math.round(minutes / 60) + " ч";
 }
 
 function anthbotApplyBattery(service, state, variables) {

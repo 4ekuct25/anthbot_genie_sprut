@@ -1205,7 +1205,60 @@ function anthbotGetShadow(session, shadowName) {
     if (!state || !state.reported) {
         return anthbotFail("в shadow '" + shadowName + "' нет state.reported");
     }
-    return { ok: true, reported: state.reported };
+    return {
+        ok: true,
+        reported: state.reported,
+        updatedAtMs: anthbotShadowUpdatedAtMs(parsed.value ? parsed.value.metadata : null)
+    };
+}
+
+/**
+ * Когда косилка в последний раз что-либо сообщила о себе.
+ *
+ * AWS IoT кладёт рядом с каждым полем reported отметку времени его последнего изменения —
+ * самая свежая из них и есть момент последней связи. Само поле `online` этого не заменяет:
+ * облако отвечает 200 и отдаёт последнее известное состояние сколь угодно долго после того,
+ * как косилка пропала, и карточка уверенно показывает «косит» у машины, которая уже не косит.
+ *
+ * Отметки идут в секундах эпохи; разбор общий с историей заданий, он же терпит миллисекунды.
+ *
+ * @param {Object} metadata поле metadata ответа GetThingShadow
+ * @returns {number|null} null, если отметок в ответе нет — тогда о свежести судить нечем
+ */
+function anthbotShadowUpdatedAtMs(metadata) {
+    var reported = metadata ? metadata.reported : null;
+    if (!reported || typeof reported !== "object") {
+        return null;
+    }
+
+    var newest = null;
+    // Обход итеративный: у Genie 800 metadata повторяет вложенность reported (param_set,
+    // nest_param_set, fw_version), а рекурсия в песочнице хаба дороже и на кривом ответе
+    // с петлёй в объекте кончилась бы переполнением стека.
+    var queue = [reported];
+    var seen = 0;
+    while (queue.length > 0 && seen < 5000) {
+        var node = queue.pop();
+        seen++;
+        if (!node || typeof node !== "object") {
+            continue;
+        }
+        for (var key in node) {
+            if (!node.hasOwnProperty(key)) {
+                continue;
+            }
+            var value = node[key];
+            if (key === "timestamp") {
+                var stamp = anthbotRecordTimeMs(value);
+                if (stamp !== null && (newest === null || stamp > newest)) {
+                    newest = stamp;
+                }
+            } else if (value && typeof value === "object") {
+                queue.push(value);
+            }
+        }
+    }
+    return newest;
 }
 
 /**
