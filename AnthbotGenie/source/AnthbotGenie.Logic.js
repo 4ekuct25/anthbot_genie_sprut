@@ -34,7 +34,7 @@ info = {
     // Версия растёт с каждой заливкой в хаб. Иначе в интерфейсе не отличить залитое
     // от прежнего: 24.08.2026 на этом потеряли полдня, доказывая косвенными признаками,
     // какой код на самом деле работает.
-    version: "1.2",
+    version: "1.3",
     author: "@s.panchenko",
     onStart: true,
     sourceServices: [HS.Switch, HS.C_Option],
@@ -515,7 +515,7 @@ function anthbotPoll(accessory, variables, options) {
         console.info("[Anthbot] связь с облаком восстановлена");
         variables.lastError = "";
     }
-    anthbotLog(options, "Состояние: " + JSON.stringify(shadow.reported));
+    anthbotLog(options, "Состояние: " + JSON.stringify(anthbotSafeState(shadow.reported)));
 
     anthbotLoadZones(variables, options);
     anthbotLoadHistory(variables, options);
@@ -690,6 +690,60 @@ function anthbotLoadHistory(variables, options) {
     if (history.rawFirst) {
         anthbotLog(options, "поля записи истории: " + anthbotKeysOf(history.rawFirst).join(", "));
     }
+}
+
+// Поля состояния, которым в логе не место. Отладочный дамп уезжает целиком в архив
+// «Скачать логи», а тот ходит по рукам — сегодня он прошёл и через переписку. В состоянии
+// Genie 800 лежат координаты участка (posegps), идентификатор SIM, подписанные ссылки
+// на файлы карты и base64-след пройденного пути: для диагностики они не нужны ни разу.
+// Сравнение по подстроке, а не по точному имени: у других моделей поля называются иначе,
+// а «url» внутри имени остаётся «url».
+const ANTHBOT_LOG_HIDDEN_PARTS = ["url", "link", "presigned", "gps", "pose",
+    "ccid", "iccid", "imei", "sim_", "curpath", "token"];
+
+// Длинные строки в лог не пишутся целиком: base64-путь занимает килобайты и вытесняет
+// из лога всё полезное. Вместо значения — его длина, чтобы поле не исчезло молча.
+const ANTHBOT_LOG_MAX_STRING = 120;
+
+/**
+ * Готовит состояние к записи в лог: без личных данных и без километровых строк.
+ *
+ * Скрытое поле не выбрасывается, а помечается — иначе в логе не отличить «поля не было»
+ * от «поле спрятали», и разбор незнакомой модели превращается в гадание.
+ *
+ * @param {Object} reported состояние из shadow
+ * @param {number} [depth] внутренний счётчик вложенности
+ * @returns {Object}
+ */
+function anthbotSafeState(reported, depth) {
+    const level = depth || 0;
+    const safe = {};
+    for (const key in reported) {
+        if (!reported.hasOwnProperty(key)) {
+            continue;
+        }
+        const value = reported[key];
+        if (anthbotIsHiddenLogKey(key)) {
+            safe[key] = "<скрыто>";
+        } else if (typeof value === "string" && value.length > ANTHBOT_LOG_MAX_STRING) {
+            safe[key] = "<строка " + value.length + " символов>";
+        } else if (value && typeof value === "object" && level < 3) {
+            safe[key] = anthbotSafeState(value, level + 1);
+        } else {
+            safe[key] = value;
+        }
+    }
+    return safe;
+}
+
+function anthbotIsHiddenLogKey(key) {
+    const lowered = String(key).toLowerCase();
+    for (let i = 0; i < ANTHBOT_LOG_HIDDEN_PARTS.length; i++) {
+        if (lowered.indexOf(ANTHBOT_LOG_HIDDEN_PARTS[i]) >= 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================================

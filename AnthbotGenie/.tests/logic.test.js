@@ -1084,6 +1084,67 @@ describe('AnthbotGenie — значение в названии сервиса',
   });
 });
 
+describe('AnthbotGenie — отладочный лог', () => {
+  // Состояние живой Genie 800 несёт то, чему в логе не место: координаты участка,
+  // идентификатор SIM, подписанные ссылки и base64-след пути. Архив «Скачать логи»
+  // потом ходит по рукам.
+  const SENSITIVE = Object.assign({}, REPORTED, {
+    '4g_ccid': '89320420000218837217',
+    anti_loss_pose: { pose2d: { x: 28.06, y: 10.37 }, posegps: { lat: 55.83, lon: 35.93 } },
+    curpath: 'FgEDBRgAAADmHwAA' + 'A'.repeat(400),
+    area_url: 'https://s3.example.com/area_SN.txt?sig=SECRET',
+    // Длинное поле, которое не под запретом по имени: проверяет правило длины отдельно
+    // от правила имени — у другой модели такой «блоб» может называться как угодно.
+    map_blob: 'B'.repeat(400),
+    // Чувствительное поле под нейтральным родителем: ловит случай, когда фильтр
+    // не спускается внутрь объектов, а у другой модели координаты лежат именно так.
+    net_config: { ip: '192.0.2.5', gps: { lat: 55.83, lon: 35.93 } },
+  });
+
+  it('личные данные и километровые строки в лог не попадают', (ctx) => {
+    mockCloud(ctx.http, SENSITIVE);
+    startScenario(ctx, { debug: true });
+
+    const logged = ctx.logs.all().map((e) => e.message).join(' ');
+    expect(logged).not.toContain('89320420000218837217');
+    expect(logged).not.toContain('55.83');
+    expect(logged).not.toContain('SECRET');
+    expect(logged).not.toContain('AAAAAAAAAA');
+    expect(logged).not.toContain('BBBBBBBBBB');
+  });
+
+  it('скрытое поле помечается, а не исчезает молча', (ctx) => {
+    // Иначе при разборе незнакомой модели не отличить «поля не было» от «поле спрятали».
+    mockCloud(ctx.http, SENSITIVE);
+    startScenario(ctx, { debug: true });
+
+    const logged = ctx.logs.all().map((e) => e.message).join(' ');
+    expect(logged).toContain('"4g_ccid":"<скрыто>"');
+    expect(logged).toContain('"map_blob":"<строка 400 символов>"');
+  });
+
+  it('то, по чему диагностируют, в логе остаётся', (ctx) => {
+    mockCloud(ctx.http, SENSITIVE);
+    startScenario(ctx, { debug: true });
+
+    const logged = ctx.logs.all().map((e) => e.message).join(' ');
+    expect(logged).toContain('"robot_sta"');
+    expect(logged).toContain('"err_code"');
+    expect(logged).toContain('"cutter_height":45');
+    expect(logged).toContain('"elec"');
+  });
+
+  it('фильтр спускается внутрь объектов, а не только по верхним полям', (ctx) => {
+    mockCloud(ctx.http, SENSITIVE);
+    startScenario(ctx, { debug: true });
+
+    const logged = ctx.logs.all().map((e) => e.message).join(' ');
+    expect(logged).toContain('"ip":"192.0.2.5"');
+    expect(logged).toContain('"gps":"<скрыто>"');
+    expect(logged).not.toContain('35.93');
+  });
+});
+
 describe('AnthbotGenie — ошибки косилки', () => {
   it('код 2012 показывается словами: косилка застряла', (ctx) => {
     // Подтверждено на живой Genie 800 24.08.2026: при этом коде приложение Anthbot
