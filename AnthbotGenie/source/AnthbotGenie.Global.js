@@ -794,6 +794,349 @@ function anthbotAreaDefinition(token, serialNumber) {
 }
 
 // ============================================================================
+// История завершённых заданий
+// ============================================================================
+
+// Страница истории. Размер выбран так, чтобы участок с ежедневным кошением укладывался
+// в одну-две страницы за сезон, а ответ не разрастался до сотен килобайт в песочнице хаба.
+var ANTHBOT_RECORDS_PAGE_SIZE = 50;
+
+// Предел страниц за один проход. Нужен не ради экономии, а чтобы неверная догадка о признаке
+// «страницы кончились» не превратилась в бесконечный опрос облака.
+var ANTHBOT_RECORDS_MAX_PAGES = 10;
+
+// Где в конверте может лежать сам список. Порядок — приоритет поиска.
+var ANTHBOT_RECORD_LIST_KEYS = ["list", "records", "rows", "items", "content", "data", "areas"];
+
+/**
+ * Приводит время задания к миллисекундам — только для упорядочивания записей.
+ *
+ * Часовой пояс намеренно не выясняется: значение никуда не выводится, по нему лишь
+ * выбирается последнее задание. Строку вида «2026-08-23 10:20:00» разбираем сами, а не
+ * через Date.parse: в песочнице хаба движок JS свой, и на нестандартном разделителе
+ * Date.parse отдаёт NaN.
+ *
+ * @param {*} value число (секунды или миллисекунды) либо строка даты
+ * @returns {number|null}
+ */
+function anthbotRecordTimeMs(value) {
+    if (typeof value === "number" && isFinite(value)) {
+        if (value <= 0) {
+            return null;
+        }
+        return value >= 1e12 ? Math.round(value) : Math.round(value * 1000);
+    }
+    if (typeof value !== "string") {
+        return null;
+    }
+    var text = value.replace(/^\s+|\s+$/g, "");
+    if (/^[0-9]+$/.test(text)) {
+        return anthbotRecordTimeMs(Number(text));
+    }
+    var parts = text.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?/);
+    if (!parts) {
+        return null;
+    }
+    return Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]),
+                    Number(parts[4]), Number(parts[5]), Number(parts[6] || 0));
+}
+
+/**
+ * Длительность задания в секундах.
+ *
+ * Поля с суффиксом _ms проверяются первыми и делятся на 1000: облако отдаёт длительность
+ * то в секундах, то в миллисекундах, и перепутанные единицы дают расхождение в тысячу раз —
+ * такую ошибку в минутах на плитке уже не заметишь.
+ *
+ * @param {Object} row запись истории
+ * @returns {number|null}
+ */
+function anthbotRecordSeconds(row) {
+    var millis = anthbotToInt(anthbotFirstDefined(row, [
+        "duration_ms", "durationMs", "mow_time_ms", "mowTimeMs"
+    ]));
+    if (millis !== null) {
+        return Math.round(millis / 1000);
+    }
+    return anthbotToInt(anthbotFirstDefined(row, [
+        "mow_time", "mowTime", "mowing_time", "mowingTime", "work_time", "workTime",
+        "use_time", "useTime", "duration"
+    ]));
+}
+
+// Насколько далеко начало задания может отстоять от его окончания. Задание не длится неделю,
+// а часовой пояс разложенных полей от пояса finish_time отличается максимум на половину суток —
+// поэтому окно широкое, но ошибку в месяц (≈30 суток) оно отсекает.
+var ANTHBOT_RECORD_START_WINDOW_MS = 7 * 24 * 3600 * 1000;
+
+/**
+ * Время начала задания из разложенных полей.
+ *
+ * Проверено на живом облаке 24.08.2026: строки `start_time` в записи нет вовсе, начало
+ * разложено по `year`, `month`, `date`, `hour`, `min`, `sec` (есть ещё `weekday`, он не нужен).
+ * Месяц считается человеческим, 1..12, и эта догадка проверяется временем окончания: разбор,
+ * который даёт начало позже конца или раньше него на неделю, отбрасывается вместо того, чтобы
+ * показать неверную дату.
+ *
+ * Постоянный сдвиг часового пояса порядок заданий не меняет — он одинаков во всех записях,
+ * а по этому времени записи только упорядочиваются.
+ *
+ * @param {Object} row
+ * @param {number|null} endMs время окончания, если его удалось прочитать
+ * @returns {number|null}
+ */
+function anthbotRecordCompositeStartMs(row, endMs) {
+    var year = anthbotToInt(anthbotFirstDefined(row, ["year"]));
+    var month = anthbotToInt(anthbotFirstDefined(row, ["month"]));
+    var day = anthbotToInt(anthbotFirstDefined(row, ["date", "day"]));
+    if (year === null || month === null || day === null) {
+        return null;
+    }
+    if (year < 100) {
+        year += 2000;
+    }
+    var hour = anthbotToInt(anthbotFirstDefined(row, ["hour"])) || 0;
+    var minute = anthbotToInt(anthbotFirstDefined(row, ["min", "minute"])) || 0;
+    var second = anthbotToInt(anthbotFirstDefined(row, ["sec", "second"])) || 0;
+
+    var startMs = Date.UTC(year, month - 1, day, hour, minute, second);
+    if (typeof endMs !== "number") {
+        return startMs;
+    }
+    var delta = endMs - startMs;
+    return (delta > -ANTHBOT_RECORD_START_WINDOW_MS && delta < ANTHBOT_RECORD_START_WINDOW_MS)
+        ? startMs : null;
+}
+
+/**
+ * Разбирает одну запись истории в форму, которой пользуется сценарий.
+ *
+ * Живая форма записи Genie 800 (снято 24.08.2026): `id`, `mow_time` в секундах,
+ * `mowing_area` в кв м, `finish_time` строкой, начало — разложенными полями, плюс `sn`,
+ * `mow_mode`, `start_cause`, `finish_cause`, `mowing_progress`, `charge_cnt`, `mow_cnt`,
+ * `x`, `y`, `angle` и подписанные ссылки `area_url`, `map_url`, `path_url`, `ebridge_url`.
+ * Имена из других реализаций оставлены кандидатами: у моделей 600 / M5 / M9 они могут отличаться.
+ *
+ * @param {Object} row
+ * @returns {Object|null} null, если в записи нет ни одного узнаваемого поля
+ */
+function anthbotParseMowingRecord(row) {
+    if (!row || typeof row !== "object") {
+        return null;
+    }
+
+    var id = anthbotFirstDefined(row, ["record_id", "recordId", "id", "area_id", "areaId"]);
+    var endMs = anthbotRecordTimeMs(anthbotFirstDefined(row, [
+        "end_time", "endTime", "finish_time", "finishTime", "update_time", "updateTime"
+    ]));
+    var startMs = anthbotRecordTimeMs(anthbotFirstDefined(row, [
+        "start_time", "startTime", "begin_time", "beginTime", "create_time", "createTime"
+    ]));
+    if (startMs === null) {
+        startMs = anthbotRecordCompositeStartMs(row, endMs);
+    }
+    var seconds = anthbotRecordSeconds(row);
+    var area = anthbotToInt(anthbotFirstDefined(row, [
+        "mow_area", "mowArea", "mowing_area", "mowingArea", "cover_area", "coverArea", "area"
+    ]));
+
+    if (id === undefined && startMs === null && seconds === null && area === null) {
+        return null;
+    }
+    return {
+        id: id === undefined ? null : String(id),
+        startMs: startMs,
+        endMs: endMs,
+        seconds: seconds,
+        area: area
+    };
+}
+
+/**
+ * Достаёт список записей из конверта, каким бы именем он ни назывался.
+ *
+ * Пустая история и непонятный ответ различаются намеренно: молча выданный пустой список
+ * превратился бы в честные с виду нули на плитке. Поэтому неизвестная форма — это отказ,
+ * и в текст отказа попадают имена полей, чтобы владельцу хаба было что прислать.
+ *
+ * @param {*} data поле data ответа облака
+ * @returns {Object} { ok, rows } либо { ok:false, error }
+ */
+function anthbotRecordRows(data) {
+    if (data && typeof data.length === "number" && typeof data !== "string") {
+        return { ok: true, rows: data };
+    }
+    if (!data || typeof data !== "object") {
+        return anthbotFail("в ответе истории нет данных");
+    }
+
+    for (var i = 0; i < ANTHBOT_RECORD_LIST_KEYS.length; i++) {
+        var candidate = data[ANTHBOT_RECORD_LIST_KEYS[i]];
+        if (candidate && typeof candidate.length === "number" && typeof candidate !== "string") {
+            return { ok: true, rows: candidate };
+        }
+    }
+
+    var total = anthbotToInt(anthbotFirstDefined(data, ["total", "count", "totalCount", "total_count"]));
+    if (total === 0) {
+        return { ok: true, rows: [] };
+    }
+
+    var keys = [];
+    for (var key in data) {
+        if (data.hasOwnProperty(key)) {
+            keys.push(key);
+        }
+    }
+    return anthbotFail("в ответе истории нет списка заданий; поля ответа: " + keys.join(", "));
+}
+
+/**
+ * Одна страница истории заданий.
+ *
+ * Эндпоинт взят из чужой HA-интеграции ha-anthbot-map-v2, где он снят захватом трафика
+ * мобильного приложения. Форма ответа на живом облаке не проверялась — отсюда разбор
+ * через списки кандидатов и явный отказ на неизвестной форме.
+ *
+ * @param {string} token
+ * @param {string} serialNumber
+ * @param {number} [page] номер страницы, с единицы
+ * @param {number} [pageSize]
+ * @returns {Object} { ok, records, rows, pageSize } либо { ok:false, error, status }
+ */
+function anthbotMowingRecordsPage(token, serialNumber, page, pageSize) {
+    var size = Math.max(1, Math.min(Number(pageSize) || ANTHBOT_RECORDS_PAGE_SIZE, 200));
+    var num = Math.max(1, Math.round(Number(page) || 1));
+
+    var result = anthbotCloudRequest("GET", "/api/v1/device/area", {
+        token: token,
+        query: "sn=" + anthbotUriEncode(serialNumber, true) +
+               "&pagenum=" + num + "&pagesize=" + size
+    });
+    if (!result.ok) {
+        return result;
+    }
+
+    var rows = anthbotRecordRows(result.data);
+    if (!rows.ok) {
+        return rows;
+    }
+
+    var records = [];
+    for (var i = 0; i < rows.rows.length; i++) {
+        var record = anthbotParseMowingRecord(rows.rows[i]);
+        if (record) {
+            records.push(record);
+        }
+    }
+    // Сырая первая запись едет наружу нарочно: форма ответа не проверена на живом облаке,
+    // и без неё владельцу хаба нечем ответить на вопрос «как облако назвало поля».
+    // Значения в лог не попадают — только имена полей (см. anthbotLoadHistory).
+    return {
+        ok: true,
+        records: records,
+        rows: rows.rows.length,
+        pageSize: size,
+        rawFirst: rows.rows.length > 0 ? rows.rows[0] : null
+    };
+}
+
+/**
+ * Вся доступная история заданий: страницы читаются до короткой либо до предела.
+ *
+ * @param {string} token
+ * @param {string} serialNumber
+ * @param {number} [maxPages]
+ * @returns {Object} { ok, records, pages, truncated } либо { ok:false, error, status }
+ */
+function anthbotMowingHistory(token, serialNumber, maxPages) {
+    var limit = Math.max(1, Math.round(Number(maxPages) || ANTHBOT_RECORDS_MAX_PAGES));
+    var records = [];
+    var pages = 0;
+    var rawFirst = null;
+
+    for (var page = 1; page <= limit; page++) {
+        var result = anthbotMowingRecordsPage(token, serialNumber, page, ANTHBOT_RECORDS_PAGE_SIZE);
+        if (!result.ok) {
+            // Первая страница не прочиталась — сообщаем отказ. Оборвавшаяся вторая оставляет
+            // неполные итоги, которые выглядели бы как «часть заданий пропала», поэтому
+            // отказ возвращается и здесь.
+            return result;
+        }
+        pages = page;
+        if (rawFirst === null) {
+            rawFirst = result.rawFirst;
+        }
+        for (var i = 0; i < result.records.length; i++) {
+            records.push(result.records[i]);
+        }
+        if (result.rows < result.pageSize) {
+            return { ok: true, records: records, pages: pages, truncated: false, rawFirst: rawFirst };
+        }
+    }
+    // Предел страниц исчерпан, а последняя страница была полной: итоги считаются по прочитанному.
+    // Молчать об этом нельзя — иначе «наработка всего» тихо окажется наработкой за часть истории.
+    return { ok: true, records: records, pages: pages, truncated: true, rawFirst: rawFirst };
+}
+
+/**
+ * Время, по которому запись сравнима с другими: начало, а без него — окончание.
+ * @param {Object|null} record
+ * @returns {number|null}
+ */
+function anthbotRecordWhenMs(record) {
+    if (!record) {
+        return null;
+    }
+    if (typeof record.startMs === "number") {
+        return record.startMs;
+    }
+    return typeof record.endMs === "number" ? record.endMs : null;
+}
+
+/**
+ * Итоги по истории: сколько всего наработано и какое задание последнее.
+ *
+ * Считается по тем записям, что отдало облако. Косилка Genie 800 наработку за всё время
+ * в состоянии не передаёт вовсе, поэтому другого источника для неё нет.
+ *
+ * @param {Object[]} records
+ * @returns {Object} { count, timeSec, areaM2, last }
+ */
+function anthbotMowingHistoryTotals(records) {
+    var list = (records && typeof records.length === "number") ? records : [];
+    var timeSec = null;
+    var areaM2 = null;
+    var last = null;
+
+    for (var i = 0; i < list.length; i++) {
+        var record = list[i];
+        if (!record) {
+            continue;
+        }
+        if (typeof record.seconds === "number" && record.seconds > 0) {
+            timeSec = (timeSec === null ? 0 : timeSec) + record.seconds;
+        }
+        if (typeof record.area === "number" && record.area > 0) {
+            areaM2 = (areaM2 === null ? 0 : areaM2) + record.area;
+        }
+        // Порядок записей в ответе не обещан, поэтому последнее задание ищется по времени —
+        // по началу, а если его нет, то по окончанию. Опираться на порядок нельзя: на живом
+        // облаке начало приходит разложенными полями, и разбор, не собиравший его, держался
+        // ровно на том, что облако отдало новое задание первым.
+        var when = anthbotRecordWhenMs(record);
+        var lastWhen = anthbotRecordWhenMs(last);
+        if (last === null) {
+            last = record;
+        } else if (when !== null && (lastWhen === null || when > lastWhen)) {
+            last = record;
+        }
+    }
+
+    return { count: list.length, timeSec: timeSec, areaM2: areaM2, last: last };
+}
+
+// ============================================================================
 // Плоскость данных AWS IoT: чтение shadow и отправка команд
 // ============================================================================
 

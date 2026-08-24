@@ -214,6 +214,209 @@ describe('AnthbotGenie — файл разметки участка', () => {
   });
 });
 
+describe('AnthbotGenie — история заданий', () => {
+  /** Запись в той форме, в которой её ждём от облака. */
+  function record(over) {
+    return Object.assign({
+      record_id: 1, start_time: '2026-08-20 10:00:00', end_time: '2026-08-20 11:00:00',
+      mow_time: 3600, mow_area: 200,
+    }, over || {});
+  }
+
+  it('идёт на эндпоинт приложения с постраничными параметрами', ({ scenario, http }) => {
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: [record()] }));
+
+    const result = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]);
+
+    expect(result.ok).toBe(true);
+    const req = http.requests[0];
+    expect(req.url).toBe(`${API}/api/v1/device/area?sn=${SN}&pagenum=1&pagesize=50`);
+    expect(req.headers['Authorization']).toBe('Bearer X');
+  });
+
+  it('разбирает запись: длительность, площадь и время начала', ({ scenario, http }) => {
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: [record()] }));
+
+    const parsed = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records[0];
+
+    expect(parsed.id).toBe('1');
+    expect(parsed.seconds).toBe(3600);
+    expect(parsed.area).toBe(200);
+    expect(parsed.startMs).toBe(Date.UTC(2026, 7, 20, 10, 0, 0));
+    expect(parsed.endMs).toBe(Date.UTC(2026, 7, 20, 11, 0, 0));
+  });
+
+  /**
+   * Живая форма записи Genie 800 — снята с настоящего облака 24.08.2026. Значения тестовые,
+   * набор и типы полей настоящие: строки `start_time` в записи нет вовсе, начало разложено
+   * по year/month/date/hour/min/sec, окончание приходит строкой, площадь — в `mowing_area`.
+   */
+  function liveRecord(over) {
+    return Object.assign({
+      id: 2512108, sn: 'GN800TEST01',
+      year: 2026, month: 8, date: 23, hour: 21, min: 17, sec: 5, weekday: 0,
+      finish_time: '2026-08-23 21:18:17',
+      mow_time: 72, mowing_area: 3, mowing_progress: 100,
+      mow_mode: 'custom_area', start_cause: 'app', finish_cause: 'finish',
+      charge_cnt: 0, mow_cnt: 1, x: 100, y: 200, angle: 90,
+      map_size: {}, path_size: {},
+      area_url: 'area_X.txt?sig=S', map_url: 'map_X.txt?sig=S',
+      path_url: 'path_X.txt?sig=S', ebridge_url: 'eb_X.txt?sig=S',
+    }, over || {});
+  }
+
+  it('живая форма Genie 800: начало собирается из разложенных полей', ({ scenario, http }) => {
+    // Прежний разбор давал здесь startMs=null, и «последнее задание» держалось только
+    // на том, что облако отдаёт новое первым. Проверено на живом облаке 24.08.2026.
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: [liveRecord()] }));
+
+    const parsed = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records[0];
+
+    expect(parsed.id).toBe('2512108');
+    expect(parsed.seconds).toBe(72);
+    expect(parsed.area).toBe(3);
+    expect(parsed.startMs).toBe(Date.UTC(2026, 7, 23, 21, 17, 5));
+    expect(parsed.endMs).toBe(Date.UTC(2026, 7, 23, 21, 18, 17));
+  });
+
+  it('разложенное начало, не сходящееся с окончанием, отбрасывается', ({ scenario, http }) => {
+    // Так ловится ошибка в соглашении о месяце: разбор на месяц мимо даёт начало
+    // за 30 суток до конца. Показать неверную дату хуже, чем не показать никакой.
+    http.mock.onGet(`${API}/api/v1/device/area`,
+      envelope({ list: [liveRecord({ month: 7 })] }));
+
+    const parsed = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records[0];
+
+    expect(parsed.startMs).toBe(null);
+    expect(parsed.endMs).toBe(Date.UTC(2026, 7, 23, 21, 18, 17));
+  });
+
+  it('последнее задание находится и когда начало не собралось', ({ scenario }) => {
+    // Тогда сравниваются времена окончания — порядок записей в ответе облако не обещает.
+    const totals = scenario.call('anthbotMowingHistoryTotals', [[
+      { id: 'старое', startMs: null, endMs: 1000, seconds: 60, area: 10 },
+      { id: 'новое', startMs: null, endMs: 5000, seconds: 60, area: 10 },
+      { id: 'среднее', startMs: null, endMs: 3000, seconds: 60, area: 10 },
+    ]]);
+
+    expect(totals.last.id).toBe('новое');
+  });
+
+  it('терпит другие имена полей: camelCase, cover_area, epoch-секунды', ({ scenario, http }) => {
+    // Форма ответа на живом облаке не проверялась, поэтому разбор идёт по списку кандидатов:
+    // единственная альтернатива — падать на первом же расхождении имён.
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({
+      records: [{ id: 7, startTime: 1787000000, mowTime: 1800, coverArea: 90 }],
+    }));
+
+    const parsed = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records[0];
+
+    expect(parsed.seconds).toBe(1800);
+    expect(parsed.area).toBe(90);
+    expect(parsed.startMs).toBe(1787000000 * 1000);
+  });
+
+  it('длительность в миллисекундах не уезжает в секунды', ({ scenario, http }) => {
+    // Перепутанные единицы дают расхождение в тысячу раз: 6 часов вместо 21,6 секунды.
+    http.mock.onGet(`${API}/api/v1/device/area`,
+      envelope({ list: [{ id: 3, duration_ms: 21600000 }] }));
+
+    expect(scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records[0].seconds)
+      .toBe(21600);
+  });
+
+  it('запись без узнаваемых полей отбрасывается, а не даёт запись из null', ({ scenario, http }) => {
+    http.mock.onGet(`${API}/api/v1/device/area`,
+      envelope({ list: [{ nonsense: true }, record()] }));
+
+    expect(scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).records)
+      .toHaveLength(1);
+  });
+
+  it('неизвестная форма ответа — отказ с перечислением полей, а не тихий ноль', ({ scenario, http }) => {
+    // Пустой список вместо отказа превратился бы в честные с виду нули на плитке наработки.
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ page: 1, unexpected: {} }));
+
+    const result = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('unexpected');
+  });
+
+  it('пустая история отличается от непонятного ответа', ({ scenario, http }) => {
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ total: 0 }));
+
+    const result = scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]);
+
+    expect(result.ok).toBe(true);
+    expect(result.records).toHaveLength(0);
+  });
+
+  it('отказ облака возвращается ошибкой', ({ scenario, http }) => {
+    http.mock.onGet(`${API}/api/v1/device/area`,
+      { status: 200, body: JSON.stringify({ code: 40100, msg: 'token expired' }) });
+
+    expect(scenario.call('anthbotMowingRecordsPage', ['Bearer X', SN, 1, 50]).ok).toBe(false);
+  });
+
+  it('страницы читаются до короткой', ({ scenario, http }) => {
+    const full = [];
+    for (let i = 0; i < 50; i++) full.push(record({ record_id: i, mow_time: 60, mow_area: 1 }));
+    http.mock.onGet(/pagenum=2/, envelope({ list: [record({ record_id: 99 })] }));
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: full }));
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]);
+
+    expect(result.ok).toBe(true);
+    expect(result.pages).toBe(2);
+    expect(result.records).toHaveLength(51);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('предел страниц отмечается признаком truncated, а не молча', ({ scenario, http }) => {
+    const full = [];
+    for (let i = 0; i < 50; i++) full.push(record({ record_id: i }));
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: full }));
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 3]);
+
+    expect(result.pages).toBe(3);
+    expect(result.truncated).toBe(true);
+    expect(http.requests).toHaveLength(3);
+  });
+
+  it('оборвавшаяся вторая страница — отказ, а не неполные итоги', ({ scenario, http }) => {
+    const full = [];
+    for (let i = 0; i < 50; i++) full.push(record({ record_id: i }));
+    http.mock.onGet(/pagenum=2/, { status: 502, body: 'bad gateway' });
+    http.mock.onGet(`${API}/api/v1/device/area`, envelope({ list: full }));
+
+    expect(scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]).ok).toBe(false);
+  });
+
+  it('итоги суммируются, последнее задание выбирается по времени, а не по порядку', ({ scenario }) => {
+    const totals = scenario.call('anthbotMowingHistoryTotals', [[
+      { id: '1', startMs: 1000, seconds: 600, area: 100 },
+      { id: '3', startMs: 3000, seconds: 300, area: 50 },
+      { id: '2', startMs: 2000, seconds: 120, area: 20 },
+    ]]);
+
+    expect(totals.count).toBe(3);
+    expect(totals.timeSec).toBe(1020);
+    expect(totals.areaM2).toBe(170);
+    expect(totals.last.id).toBe('3');
+  });
+
+  it('пустая история даёт null, а не нули: нуля наработки не бывает', ({ scenario }) => {
+    const totals = scenario.call('anthbotMowingHistoryTotals', [[]]);
+
+    expect(totals.count).toBe(0);
+    expect(totals.timeSec).toBe(null);
+    expect(totals.areaM2).toBe(null);
+    expect(totals.last).toBe(null);
+  });
+});
+
 describe('AnthbotGenie — чтение shadow', () => {
   it('идёт по точному URL и подписывает запрос', ({ scenario, http }) => {
     http.mock.onGet(`https://${ENDPOINT}/things/${SN}/shadow`, {
