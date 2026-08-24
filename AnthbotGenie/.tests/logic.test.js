@@ -1360,11 +1360,12 @@ describe('AnthbotGenie — история заданий', () => {
   it('после отказа облака история пробуется снова через пять минут, а не через час', (ctx) => {
     // Живой случай 24.08.2026: облако отдало на этот эндпоинт HTTP 503. Часовой перерыв
     // означал бы час пустой плитки из-за одной неудачной секунды.
+    // Первый опрос кладём целиком: и обычный запрос, и все запасные варианты (их три).
     let reads = 0;
     ctx.http.mock.on((req) => {
       if (req.method !== 'GET' || req.url.indexOf('/api/v1/device/area') < 0) return false;
       reads += 1;
-      return reads === 1;
+      return reads <= 4;
     }, { status: 503, body: '' });
     mockCloud(ctx.http);
     const { mower } = startScenario(ctx);

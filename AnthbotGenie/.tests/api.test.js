@@ -385,6 +385,60 @@ describe('AnthbotGenie — история заданий', () => {
     expect(http.requests).toHaveLength(3);
   });
 
+  it('на 503 запрос повторяется запасным способом', ({ scenario, http }) => {
+    // Живой случай 24.08.2026: облако отдаёт хабу 503 на этот эндпоинт, отвечая 200
+    // на тот же запрос из разведки. Значит спрашивать надо иначе, а не сдаваться.
+    http.mock.onGet(/pagesize=10/, envelope({ list: [record()] }));
+    http.mock.onGet(`${API}/api/v1/device/area`, { status: 503, body: '' });
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]);
+
+    expect(result.ok).toBe(true);
+    expect(result.records).toHaveLength(1);
+    expect(result.variant).toBe('страница на 10 записей');
+  });
+
+  it('перебор доходит до варианта без сжатия, если лёгкая страница не помогла', ({ scenario, http }) => {
+    http.mock.on((req) => req.method === 'GET' &&
+      req.url.indexOf('/api/v1/device/area') >= 0 &&
+      req.headers['Accept-Encoding'] === 'identity', envelope({ list: [record()] }));
+    http.mock.onGet(`${API}/api/v1/device/area`, { status: 503, body: '' });
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]);
+
+    expect(result.ok).toBe(true);
+    expect(result.variant).toBe('без сжатия');
+  });
+
+  it('найденный вариант применяется и к следующим страницам', ({ scenario, http }) => {
+    // Иначе вторая страница снова уйдёт тем способом, который облако уже отвергло,
+    // и обход развалится ровно там, где начинается вторая страница.
+    const full = [];
+    for (let i = 0; i < 10; i++) full.push(record({ record_id: i }));
+    http.mock.onGet(/pagenum=2&pagesize=10/, envelope({ list: [record({ record_id: 99 })] }));
+    http.mock.onGet(/pagesize=10/, envelope({ list: full }));
+    http.mock.onGet(`${API}/api/v1/device/area`, { status: 503, body: '' });
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]);
+
+    expect(result.ok).toBe(true);
+    expect(result.pages).toBe(2);
+    expect(result.records).toHaveLength(11);
+    const asked = http.requests.filter((r) => r.url.indexOf('pagenum=2') >= 0);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].url).toContain('pagesize=10');
+  });
+
+  it('отказ не-пятисотый разбирается как раньше, без перебора', ({ scenario, http }) => {
+    // 401 значит «токен протух», а не «спроси иначе»: перебирать варианты бессмысленно.
+    http.mock.onGet(`${API}/api/v1/device/area`, { status: 401, body: 'unauthorized' });
+
+    const result = scenario.call('anthbotMowingHistory', ['Bearer X', SN, 10]);
+
+    expect(result.ok).toBe(false);
+    expect(http.requests.filter((r) => r.url.indexOf('/device/area') >= 0)).toHaveLength(1);
+  });
+
   it('оборвавшаяся вторая страница — отказ, а не неполные итоги', ({ scenario, http }) => {
     const full = [];
     for (let i = 0; i < 50; i++) full.push(record({ record_id: i }));
