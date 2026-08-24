@@ -16,6 +16,7 @@ const OPTIONS = {
   areaCode: '7',
   serialNumber: '',
   pollIntervalSec: 60,
+  staleMinutes: 15,
   commandViaShadow: false,
   valueInName: true,
   debug: false,
@@ -59,12 +60,41 @@ const HISTORY = [
   { record_id: 2, start_time: '2026-08-22 09:00:00', mow_time: 1800, mow_area: 110 },
 ];
 
+/**
+ * Ответ GetThingShadow с отметками свежести: AWS кладёт время последнего изменения каждого
+ * поля в metadata.reported. По ним сценарий и понимает, что косилка замолчала.
+ *
+ * Отметки строятся по часам СЦЕНАРИЯ (`nowMs`), а не по `Date.now()` теста: у симулятора
+ * свой стартовый момент, и фикстура по реальным часам оказывается на два года в будущем.
+ * Возраст тогда выходит отрицательным, сценарий считает это расхождением часов — и проверка
+ * молча проходит, ничего не проверив.
+ *
+ * @param {Object} reported состояние
+ * @param {number} ageSec сколько секунд назад косилка выходила на связь
+ * @param {number} nowMs текущий момент по часам сценария (ctx.time.now())
+ */
+function shadowBody(reported, ageSec, nowMs) {
+  if (nowMs === undefined) {
+    // Без явных часов отметок не кладём вовсе: тест, которому свежесть безразлична, не должен
+    // зависеть от часов — иначе он проверяет не то, что написано в его названии.
+    return { status: 200, body: JSON.stringify({ state: { reported } }) };
+  }
+  const stamp = Math.floor(nowMs / 1000) - (ageSec || 0);
+  return {
+    status: 200,
+    body: JSON.stringify({
+      state: { reported },
+      metadata: { reported: { elec: { timestamp: stamp }, param_set: { cutter_height: { timestamp: stamp - 60 } } } },
+    }),
+  };
+}
+
 function envelope(data) {
   return { status: 200, body: JSON.stringify({ code: 0, msg: 'ok', data: data }) };
 }
 
 /** Полный успешный контур облака: логин, устройство, креды, shadow, разметка. */
-function mockCloud(http, reported, area) {
+function mockCloud(http, reported, area, nowMs) {
   http.mock.onPost(`${API}/api/v1/login`, envelope({ access_token: 'ACCESS1' }));
   http.mock.onGet(`${API}/api/v1/device/bind/list`,
     envelope([{ sn: SN, alias: 'Косилка', category_id: 'Genie 800', is_owner: 1 }]));
@@ -79,10 +109,7 @@ function mockCloud(http, reported, area) {
     envelope({ presigned_url: 'https://s3.example.com/area.txt' }));
   http.mock.onGet('https://s3.example.com/area.txt',
     { status: 200, body: JSON.stringify(area || AREA) });
-  http.mock.onGet(SHADOW_URL, {
-    status: 200,
-    body: JSON.stringify({ state: { reported: reported || REPORTED } }),
-  });
+  http.mock.onGet(SHADOW_URL, shadowBody(reported || REPORTED, 0, nowMs));
   http.mock.onPost(SHADOW_URL, { status: 200, body: '{}' });
   http.mock.onPost(/\/topics\//, { status: 200, body: '{}' });
 }
@@ -1054,6 +1081,101 @@ describe('AnthbotGenie — значение в названии сервиса',
     const { mower } = startScenario(ctx);
 
     expect(String(serviceByKey(mower, 'mapstate').getName())).toBe('Карта mapstate');
+  });
+});
+
+describe('AnthbotGenie — потеря связи с косилкой', () => {
+  /** Полный контур облака, но косилка молчит уже ageSec секунд. */
+  function mockStale(ctx, ageSec, reported) {
+    ctx.http.mock.onGet(SHADOW_URL, shadowBody(reported || REPORTED, ageSec, ctx.time.now()));
+    mockCloud(ctx.http, reported, null, ctx.time.now());
+  }
+
+  it('свежее состояние показывается как обычно', (ctx) => {
+    mockCloud(ctx.http, null, null, ctx.time.now());
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+  });
+
+  it('молчащая в поле косилка перестаёт выдаваться за косящую', (ctx) => {
+    // Облако отвечает 200 и отдаёт последнее известное состояние сколь угодно долго после того,
+    // как косилка пропала. Без этой проверки карточка уверенно показывает «косит».
+    mockStale(ctx, 40 * 60);
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue())
+      .toBe('Связь потеряна 40 мин назад (было: Косит весь газон)');
+  });
+
+  it('на базе то же молчание тревогой не считается', (ctx) => {
+    // На базе косилка засыпает и молчит часами — порог там в 24 раза мягче.
+    mockStale(ctx, 40 * 60, Object.assign({}, REPORTED, { robot_sta: { value: 'charge' } }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('На зарядке');
+  });
+
+  it('на базе связь всё-таки может пропасть — за суточным порогом', (ctx) => {
+    mockStale(ctx, 7 * 60 * 60, Object.assign({}, REPORTED, { robot_sta: { value: 'charge' } }));
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue())
+      .toBe('Связь потеряна 7 ч назад (было: На зарядке)');
+  });
+
+  it('нулевой порог выключает проверку целиком', (ctx) => {
+    mockStale(ctx, 10 * 60 * 60);
+    const { mower } = startScenario(ctx, { staleMinutes: 0 });
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+  });
+
+  it('ответ без отметок свежести не выдумывает потерю связи', (ctx) => {
+    // У другой модели metadata может не прийти вовсе — судить тогда не по чему,
+    // и сценарий обязан вести себя как раньше, а не показывать тревогу на пустом месте.
+    ctx.http.mock.onGet(SHADOW_URL, {
+      status: 200, body: JSON.stringify({ state: { reported: REPORTED } }),
+    });
+    mockCloud(ctx.http);
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+  });
+
+  it('часы хаба впереди облачных — это не свежесть из будущего и не тревога', (ctx) => {
+    mockStale(ctx, -3 * 60 * 60);
+    const { mower } = startScenario(ctx);
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+  });
+
+  it('о пропаже связи сказано в обычный лог, а не только в отладочный', (ctx) => {
+    mockStale(ctx, 40 * 60);
+    startScenario(ctx);
+
+    expect(ctx.logs.containing('не выходила на связь').length).toBeGreaterThan(0);
+    // Повторный опрос ту же пропажу в лог не повторяет
+    ctx.time.advance('61s');
+    expect(ctx.logs.containing('не выходила на связь')).toHaveLength(1);
+  });
+
+  it('вернувшаяся связь возвращает статус и отмечается в логе', (ctx) => {
+    // Правило-счётчик первым: со второго чтения косилка снова на связи.
+    let reads = 0;
+    ctx.http.mock.on((req) => {
+      if (req.method !== 'GET' || req.url.indexOf('/shadow?name=property') < 0) return false;
+      reads += 1;
+      return reads > 1;
+    }, shadowBody(REPORTED, 0, ctx.time.now() + 30000));
+    mockStale(ctx, 40 * 60);
+    const { mower } = startScenario(ctx);
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toContain('Связь потеряна');
+
+    ctx.time.advance('61s');
+
+    expect(charByKey(mower, 'status', HC.C_String).getValue()).toBe('Косит весь газон');
+    expect(ctx.logs.containing('снова выходит на связь').length).toBeGreaterThan(0);
   });
 });
 
