@@ -34,7 +34,7 @@ info = {
     // Версия растёт с каждой заливкой в хаб. Иначе в интерфейсе не отличить залитое
     // от прежнего: 24.08.2026 на этом потеряли полдня, доказывая косвенными признаками,
     // какой код на самом деле работает.
-    version: "1.1",
+    version: "1.2",
     author: "@s.panchenko",
     onStart: true,
     sourceServices: [HS.Switch, HS.C_Option],
@@ -157,6 +157,7 @@ info = {
         historyTotals: null,
         historyTruncatedReported: false,
         historyError: "",
+        lastErrorCode: null,
         staleReported: false,
         zoneTouchedAtMs: 0,
         appliedZoneSignature: "",
@@ -717,6 +718,7 @@ function anthbotApplyState(state, reported, services, variables, options) {
     anthbotWriteServiceValue(services, "nestlevel", state.nestInspectionLevel, variables);
 
     anthbotWriteServiceValue(services, "error", anthbotErrorText(state.errorCode), variables);
+    anthbotReportErrorCode(state, variables);
     anthbotWriteServiceValue(services, "rtk", anthbotAsText(state.rtkState), variables);
     anthbotWriteServiceValue(services, "ip", anthbotAsText(state.ip), variables);
     anthbotWriteServiceValue(services, "ssid", anthbotAsText(state.ssid), variables);
@@ -1189,6 +1191,61 @@ function anthbotTotalFor(reportedValue, variables, totalsField) {
     return totals ? totals[totalsField] : null;
 }
 
+/**
+ * Сообщает в обычный лог о появлении и снятии ошибки косилки.
+ *
+ * Плитки достаточно, только если на неё смотрят. Застрявшая косилка — как раз тот случай,
+ * когда узнать хочется сразу, а разбираться потом: в логе останется момент, когда это началось.
+ * Повторяется только на смену кода, иначе одна ошибка писала бы строку каждую минуту.
+ */
+// Поля состояния, из которых берётся код ошибки, — тем же порядком, что и в разборе
+// (см. errorCode в anthbotMapReported глобального сценария). Список продублирован здесь
+// только ради лога: у незнакомого кода первым делом нужно знать, откуда он пришёл, иначе
+// спорить о смысле кода бессмысленно — можно смотреть не в то поле.
+const ANTHBOT_ERROR_FIELDS = ["error.value", "error", "error_code", "err_code"];
+
+/** Значение поля состояния по пути вида «error.value»; undefined, если пути нет. */
+function anthbotReportedAt(reported, path) {
+    const parts = String(path).split(".");
+    let current = reported;
+    for (let i = 0; i < parts.length; i++) {
+        if (current === null || current === undefined || typeof current !== "object") {
+            return undefined;
+        }
+        current = current[parts[i]];
+    }
+    return current;
+}
+
+/** Перечисляет поля-кандидаты, которые реально есть в состоянии: «err_code=2012». */
+function anthbotErrorSource(reported) {
+    const found = [];
+    for (let i = 0; i < ANTHBOT_ERROR_FIELDS.length; i++) {
+        const value = anthbotReportedAt(reported, ANTHBOT_ERROR_FIELDS[i]);
+        if (value !== undefined && value !== null && typeof value !== "object") {
+            found.push(ANTHBOT_ERROR_FIELDS[i] + "=" + value);
+        }
+    }
+    return found.join(", ");
+}
+
+function anthbotReportErrorCode(state, variables) {
+    const code = state.errorCode;
+    if (code === null || code === undefined || code === variables.lastErrorCode) {
+        return;
+    }
+    variables.lastErrorCode = code;
+
+    if (code === 0) {
+        console.info("[Anthbot] ошибка снята, косилка сообщает «Нет ошибок»");
+        return;
+    }
+    // Источник кода в той же строке: без него непонятно, читаем ли мы вообще то поле.
+    console.warn("[Anthbot] косилка сообщает об ошибке: " + anthbotErrorText(code) +
+                 " (код " + code + "; поля состояния: " +
+                 (anthbotErrorSource(variables.reported) || "не найдены") + ")");
+}
+
 /** Имена полей объекта по алфавиту — для лога, где значения показывать нельзя. */
 function anthbotKeysOf(object) {
     const keys = [];
@@ -1261,11 +1318,24 @@ function anthbotStateValueForKey(key, state) {
     return undefined;
 }
 
+// Расшифровки кодов ошибок. Здесь только то, что подтверждено на живой косилке — текстом
+// из приложения Anthbot. Открытые таблицы (HA-интеграции, страница производителя) знают
+// коды 0…237 в формате Exxx, а прошивка 1.20.9 сообщает четырёхзначные из другого
+// пространства: 2012 пришло при застревании, когда приложение писало «The machine is stuck».
+// Правило пополнения: код добавляется только вместе со снятым с приложения текстом.
+// Незнакомый код показывается числом — придуманная расшифровка хуже голой цифры.
+const ANTHBOT_ERROR_LABELS = {
+    2012: "Косилка застряла"
+};
+
 function anthbotErrorText(errorCode) {
     if (errorCode === null || errorCode === undefined) {
         return null;
     }
-    return errorCode === 0 ? "Нет ошибок" : ("Ошибка " + errorCode);
+    if (errorCode === 0) {
+        return "Нет ошибок";
+    }
+    return ANTHBOT_ERROR_LABELS[errorCode] || ("Ошибка " + errorCode);
 }
 
 function anthbotAsText(value) {
